@@ -20,6 +20,11 @@ def badge(status: str) -> str:
 
 
 
+def title_year(title: str, year=None) -> str:
+    """Display title as `Title (YYYY)` when the year is known."""
+    return f"{title} ({year})" if year else title
+
+
 def qualities(d: Drama) -> list[str]:
     out = []
     for e in d.episodes:
@@ -60,7 +65,7 @@ def drama_card(d: Drama, limit: int = CAPTION_LIMIT, brand: str = "@kdrama_heave
     eps = len(d.episodes)
     total = f"/{d.total_episodes}" if d.total_episodes else ""
     q = qualities(d)
-    sub = " · ".join(x for x in [str(d.year) if d.year else "", "K-Drama"] if x)
+    sub = "K-Drama"
     rows = [("Status", f"<code>{badge(d.status)}</code>"),
             ("Episodes", f"<code>{eps}{total}</code>")]
     au = audio_tags(d, default_audio)
@@ -70,7 +75,7 @@ def drama_card(d: Drama, limit: int = CAPTION_LIMIT, brand: str = "@kdrama_heave
         rows.append(("Quality", f"<code>{h(' '.join(q))}</code>"))
     if getattr(d, "imdb", None):
         rows.append(("IMDb", f"⭐ {h(d.imdb)}/10"))
-    head = (f"✦ <b>{h(d.title)}</b> ✦\n<i>{h(sub)}</i>\n\n╭{LINE}\n"
+    head = (f"✦ <b>{h(title_year(d.title, d.year))}</b> ✦\n<i>{h(sub)}</i>\n\n╭{LINE}\n"
             + "".join(f"├ <b>{k}</b> · {v}\n" for k, v in rows) + f"╰{LINE}\n")
     tags = " ".join(_tag(g) for g in d.genre_list)
     tail = (f"\n{h(tags)}" if tags else "") + f"\n\n✦ <b>Powered by</b> {h(brand)}  ·  <code>#{d.id}</code>"

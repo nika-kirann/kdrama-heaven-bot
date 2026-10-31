@@ -29,8 +29,8 @@ def fake(**kw):
 
 def test_card_layout_and_escaping():
     c = drama_card(fake(synopsis="A <b>bold</b> & sweet story", imdb="8.2"), brand="@kdrama_heaven")
-    assert "✦ <b>Love &lt;&amp;&gt; Code</b> ✦" in c
-    assert "<i>2025 · K-Drama</i>" in c and "<code>ONGOING 🔄</code>" in c and "<code>2/16</code>" in c
+    assert "✦ <b>Love &lt;&amp;&gt; Code (2025)</b> ✦" in c
+    assert "<i>K-Drama</i>" in c and "<code>ONGOING 🔄</code>" in c and "<code>2/16</code>" in c
     assert "<b>Quality</b> · <code>720p 1080p 480p</code>" in c
     assert "<b>Audio</b> · <code>[Korean] [Eng Sub]</code>" in c and "⭐ 8.2/10" in c
     assert "#Romance #SliceOfLife" in c and "&lt;b&gt;bold&lt;/b&gt; &amp; sweet" in c
@@ -92,3 +92,10 @@ async def test_edit_audio_and_imdb(env):
     assert d.audio == "Korean, Hindi Dub" and d.imdb == "8.4"
     await env.send(msg_update(f"/edit {d.id} imdb eleven", ADMIN))
     assert "rating like" in env.req.of("sendMessage")[-1]["text"]
+
+
+def test_title_year_format():
+    from services import title_year
+    assert title_year("Moonlit Promise", 2024) == "Moonlit Promise (2024)"
+    assert title_year("Moonlit Promise", None) == "Moonlit Promise"
+    assert "✦ <b>No Year Show</b> ✦" in drama_card(fake(title="No Year Show", year=None))
