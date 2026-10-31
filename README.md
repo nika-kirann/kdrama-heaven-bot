@@ -101,34 +101,48 @@ How the Telegram backend works:
 - **Posters**: when an admin adds a poster (photo or URL) it is re-sent to the storage channel and its Telegram `file_id` + message id are kept in the DB, so it never depends on the local disk. Optional local cache: `POSTER_CACHE_DIR=/tmp/posters`.
 - Limits: Bot API downloads are capped at 20 MB, which is far beyond this DB. Don't unpin or delete the backup message. Run only **one** instance per token.
 
-## Deploy on Koyeb
+## Deploy on Koyeb (Free web service + UptimeRobot)
 
-Koyeb pricing (checked 31 Oct 2026, [koyeb.com/pricing](https://www.koyeb.com/pricing), [instance docs](https://www.koyeb.com/docs/reference/instances)):
-- New accounts have **no free plan** any more (the Starter plan was closed in Feb 2026). The entry plan is **Pro, $29/month, including $10 of compute**.
-- The free instance (for older orgs) **can't run workers and sleeps after 1 h idle**, so it doesn't fit this bot.
-- This bot uses **`eco-nano`** (0.1 vCPU, 256 MB, Singapore): **$1.61/month** always on, covered by the Pro credit. If memory gets tight, use `eco-micro` ($2.68).
-- A **worker** service with min scale 1 runs 24/7: it **never sleeps** (no scale-to-zero, no HTTP needed). If the process crashes Koyeb restarts it, and the DB comes back from Telegram.
+The bot also starts a tiny HTTP server when `PORT` is set (the Dockerfile sets `PORT=8000`; Koyeb passes `PORT` too):
+`GET /healthz`, `GET /` (and `HEAD`) return `200 {"ok": true, "uptime_s": …}`; anything else returns 404. Locally `PORT` is unset, so no server starts.
+
+Koyeb's **Free** instance only runs **Web services** (0.1 vCPU, 512 MB, Frankfurt or Washington) and **scales to zero after 1 h without HTTP traffic**. While asleep the bot doesn't poll Telegram. UptimeRobot hitting `/healthz` every 5 minutes keeps it awake. Honest limits:
+- Koyeb closed Free/Starter to new sign-ups in Feb 2026. This only works on an organization that still has the free instance.
+- If a ping is missed or Koyeb restarts the instance, the bot is offline for a few seconds to a minute, then restores the DB from the storage channel.
+- Paid alternative with no pinger needed: Worker, `eco-nano`, Singapore, $1.61/month (Pro plan required).
 
 Steps:
-1. **Push to GitHub** (private repo): `git push -u origin main`. `.env` and `*.db` are git-ignored.
-2. **Storage channel**: in Telegram create a new *private* channel (e.g. "kdrama storage"), add **@kdrama_help_robot as admin** (post, edit, delete, pin). Get its id (`-100…`): forward a post from it to @userinfobot or @RawDataBot.
-3. **Stop the local bot** before Koyeb starts (only one poller per token): `kill -TERM $(pgrep -f "python main.py")`. To carry the current data over, run the local bot once with `STORAGE_BACKEND=telegram` and `STORAGE_CHANNEL_ID=…` so it uploads the backup, then stop it.
-4. **Koyeb**: sign up, choose a plan, *Settings → Secrets*, create the secrets `BOT_TOKEN`, `CHANNEL_ID` (`@kdrama_heaven`), `STORAGE_CHANNEL_ID` (`-100…`), `ADMIN_IDS`.
-5. **Create the app**: *Create Service → GitHub →* `nika-kirann/kdrama-heaven-bot`, branch `main`, builder **Dockerfile**, service type **Worker**, region **Singapore**, instance **eco-nano**, scaling 1–1. Env vars (secrets are referenced from step 4):
+1. **Storage channel**: private channel, **@kdrama_help_robot as admin** (post/edit/delete/pin). Its id goes in `STORAGE_CHANNEL_ID` (already seeded: `-1004241251090`).
+2. **Only one instance per token.** Keep the local bot stopped.
+3. **Koyeb → Secrets**: `BOT_TOKEN`, `CHANNEL_ID` (`@kdrama_heaven`), `STORAGE_CHANNEL_ID`, `ADMIN_IDS`.
+4. **Create Service → Web service → GitHub** `nika-kirann/kdrama-heaven-bot`, branch `main`, builder **Dockerfile**, instance **Free**, region **Frankfurt**.
+   - Port **8000 / HTTP**, route `/`.
+   - Health check: HTTP `/healthz` on 8000.
+   - Env vars:
 
    | Variable | Value |
    | --- | --- |
-   | `BOT_TOKEN` | secret `BOT_TOKEN` |
+   | `BOT_TOKEN` | secret `BOT_TOKEN` (paste your bot token) |
    | `CHANNEL_ID` | secret `CHANNEL_ID` |
    | `STORAGE_CHANNEL_ID` | secret `STORAGE_CHANNEL_ID` |
    | `ADMIN_IDS` | secret `ADMIN_IDS` |
+   | `PORT` | `8000` |
    | `STORAGE_BACKEND` | `telegram` |
    | `TIMEZONE` | `Asia/Kolkata` |
    | `DAILY_DIGEST_TIME` | `10:00` |
    | `CLEANUP_DAYS` | `2` |
    | `CLEANUP_TIME` | `03:30` |
 
-   CLI alternative: install the Koyeb CLI, run `koyeb login`, create the secrets with `koyeb secret create BOT_TOKEN --value '<token>'` (and the same for the others), then run `./deploy-koyeb.sh`. `koyeb.yaml` lists the same settings for reference.
-6. **Deploy and read the logs**: *Service → Logs* (or `koyeb service logs kdrama-heaven/bot`). You should see `Telegram storage: restored DB…` or `no backup found… starting fresh`, then `Logged in as @kdrama_help_robot` and `Application started`.
-7. **Verify**: send `/start` to the bot, and check that the storage channel has a pinned `kdrama-backup.db`, refreshed a few seconds after each admin change.
-8. **Updates**: `git push` to `main` makes Koyeb rebuild and redeploy automatically. The old instance gets SIGTERM, does a final flush, and the new one restores it.
+   CLI alternative: `koyeb login`, create the secrets with `koyeb secret create NAME --value '…'`, then run `./deploy-koyeb.sh`. `koyeb.yaml` mirrors the same settings.
+5. **Deploy and check the logs**: you should see `Health server listening on 0.0.0.0:8000`, `restored DB from message …`, `Logged in as @kdrama_help_robot`, `Application started`. Then open `https://<app>-<org>.koyeb.app/healthz` and check it returns `{"ok": true, …}`.
+6. **UptimeRobot** (free account at uptimerobot.com) → *Add New Monitor*:
+   - Monitor type **HTTP(s)**
+   - Friendly name `kdrama bot`
+   - URL `https://<your-app>.koyeb.app/healthz`
+   - Interval **5 minutes** (the free minimum)
+   - Timeout 30 s
+   - Alert contact: your email/Telegram
+   - Optional: keyword monitor on `"ok": true`
+
+   UptimeRobot alerts you if it stops returning 200.
+7. **Updates**: `git push` to `main` redeploys automatically (old instance: SIGTERM → final backup flush; new instance restores it).

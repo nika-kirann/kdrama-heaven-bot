@@ -13,6 +13,7 @@ from config import config
 from db import Database
 from services import ChannelService
 from storage import make_storage
+from health import start_health_server
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -91,6 +92,7 @@ def main() -> int:
     if not config.admin_ids:
         log.warning("ADMIN_IDS is empty: nobody can use admin commands. Get your id from @userinfobot.")
     try:
+        start_health_server()
         build_app().run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     except InvalidToken:
         log.error("Telegram rejected BOT_TOKEN (invalid or revoked). Get a fresh one from @BotFather.")

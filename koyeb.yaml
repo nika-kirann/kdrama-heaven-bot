@@ -1,13 +1,18 @@
-# Koyeb service definition for the kdrama_heaven bot (reference spec).
-# Koyeb does not auto-read this file: apply the same settings in the control panel,
-# or use the equivalent CLI command in deploy-koyeb.sh / README "Deploy on Koyeb".
+# Koyeb service definition for the kdrama_heaven bot (reference spec; Koyeb doesn't auto-read it).
+# Apply in the control panel, or run ./deploy-koyeb.sh (CLI equivalent).
 app: kdrama-heaven
 service:
   name: bot
-  type: worker              # long polling: no public port, no route, no HTTP health check
-  instance_type: eco-nano   # 0.1 vCPU / 256 MB, $1.61/mo always on (Singapore). Upgrade: eco-micro ($2.68)
-  regions: [sin]            # Singapore: closest Koyeb region to India (no Bangalore region)
-  scaling: {min: 1, max: 1} # exactly one poller; never scale to zero (Telegram allows one getUpdates consumer)
+  type: web                 # Free instances only allow WEB services (no workers)
+  instance_type: free       # 0.1 vCPU / 512 MB; sleeps after 1 h without HTTP traffic -> ping /healthz
+  regions: [fra]            # Free is Frankfurt (fra) or Washington (was) only
+  scaling: {min: 1, max: 1} # one poller per token
+  ports:
+    - {port: 8000, protocol: http}
+  routes:
+    - {path: /, port: 8000}
+  health_checks:
+    - {type: http, port: 8000, path: /healthz}
   git:
     repository: github.com/nika-kirann/kdrama-heaven-bot
     branch: main
@@ -19,10 +24,11 @@ service:
     CHANNEL_ID: "@CHANNEL_ID"
     STORAGE_CHANNEL_ID: "@STORAGE_CHANNEL_ID"
     ADMIN_IDS: "@ADMIN_IDS"
+    PORT: "8000"
     TIMEZONE: Asia/Kolkata
     STORAGE_BACKEND: telegram
     DAILY_DIGEST_TIME: "10:00"
     CLEANUP_DAYS: "2"
     CLEANUP_TIME: "03:30"
     DATABASE_URL: sqlite:////tmp/kdrama.db
-  health_checks: none       # workers have no TCP/HTTP check; Koyeb restarts the instance if the process exits
+# Paid alternative (never sleeps, no pinger needed): type: worker, instance_type: eco-nano, regions: [sin]
