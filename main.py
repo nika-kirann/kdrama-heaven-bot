@@ -46,10 +46,25 @@ async def start_storage(app: Application):
         if await st.restore():
             db.reload()
         db.on_commit = st.schedule_flush
+        await sync_posters(app)
         await st.flush()  # make sure a backup exists right away (fresh start)
         log.info("Storage: telegram (chat %s, backup message %s)", st.chat_id, st.backup_msg_id)
     else:
         log.info("Storage: local (%s)", db.path)
+
+
+async def sync_posters(app: Application) -> int:
+    """Copy posters that aren't in the storage channel yet (e.g. added while STORAGE_BACKEND=local)."""
+    db, svc = app.bot_data["db"], app.bot_data["svc"]
+    n = 0
+    for d in db.list_dramas(limit=10000)[0]:
+        if d.poster and not d.poster_msg_id:
+            ch = await svc.persist_poster(d.poster)
+            if ch.get("poster_msg_id"):
+                db.update_drama(d.id, **ch)
+                n += 1
+    log.info("Storage: %s poster(s) copied to the storage channel", n)
+    return n
 
 
 async def post_stop(app: Application):

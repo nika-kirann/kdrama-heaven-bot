@@ -249,10 +249,14 @@ async def test_app_lifecycle_restore_then_post_stop_flush(tmp_path):
     app = Application.builder().token(DUMMY_TOKEN).request(req).get_updates_request(FakeRequest()).build()
     db = Database(cfg.database_url)
     st = make_storage(cfg, app.bot, db.path)
-    app.bot_data.update(cfg=cfg, db=db, storage=st)
+    from services import ChannelService
+    app.bot_data.update(cfg=cfg, db=db, storage=st, svc=ChannelService(app.bot, db, cfg, st))
+    old = db.add_drama(title="Love in Disguise", poster="OLD_LOCAL_FID")   # added while backend was local
     await app.initialize()
-    await main.start_storage(app)            # fresh start -> first backup pinned
+    await main.start_storage(app)            # fresh start -> poster copied, first backup pinned
     assert req.pinned and db.on_commit
+    d = db.get_drama(old.id)
+    assert d.poster == "STORED_OLD_LOCAL_FID" and d.poster_msg_id
     st.delay = 60
     db.add_request(5, "u", "Please add Moving")
     await main.post_stop(app)                # shutdown flush without waiting 60 s

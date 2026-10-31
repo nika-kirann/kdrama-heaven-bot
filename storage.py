@@ -134,7 +134,7 @@ class TelegramStorage:
                 try:
                     await self.bot.edit_message_media(
                         chat_id=self.chat_id, message_id=self.backup_msg_id,
-                        media=InputMediaDocument(InputFile(data, filename=BACKUP_NAME), caption=caption))
+                        media=InputMediaDocument(data, filename=BACKUP_NAME, caption=caption))
                     self.flushes += 1
                     return
                 except BadRequest as e:
