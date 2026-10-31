@@ -84,6 +84,10 @@ Add an `EP 9` line to jump to episode 9. Plain URLs with no quality are saved as
 - Episode buttons are shared by every viewer of a channel post, so if one person turns the page, everyone sees that page. Each card has a Back button.
 - Schedules are stored in SQLite and restored on startup. Any that were missed while the bot was offline are posted right after it starts.
 
+## Private browsing
+
+Channel post keyboards are shared by everyone, so the channel card only ever shows **Browse episodes / Request / Search**. Tapping Browse (or any episode/quality button on a channel post) never edits the post: the bot DMs that viewer their own copy of the card, and all episode → quality → parts/mirrors, Prev/Next and Back taps edit that private message. If the viewer hasn't started the bot yet, the tap opens `t.me/<bot>?start=drama_<id>`, and after /start they get the private card.
+
 ## Tests
 `.venv/bin/pytest -q` runs the whole bot against a fake Telegram HTTP layer (`tests/fakes.py`) with a dummy token. No network access is needed.
 

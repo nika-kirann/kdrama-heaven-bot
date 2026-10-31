@@ -131,14 +131,16 @@ async def test_episode_pagination(env):
     assert any(b["text"] == "Next ➡️" for b in flat) and not any(b["text"] == "⬅️ Prev" for b in flat)
     last = [b for row in episodes_keyboard(d, 2).to_dict()["inline_keyboard"] for b in row]
     assert [b["text"] for b in last if b["text"].startswith("EP")] == ["EP 21", "EP 22", "EP 23"]
-    # tapping in the channel edits the post's keyboard in place
+    # tapping in the channel never edits the shared post; the viewer gets a private copy in DM
     card = env.db.card_post(d.id)
+    before = len(env.req.of("editMessageReplyMarkup"))
     await env.send(cb_update(f"eps:{d.id}:1", VIEWER, chat_id=CHANNEL, message_id=card.message_id, chat_type="channel"))
-    e = env.req.of("editMessageReplyMarkup")[-1]
-    assert e["message_id"] == card.message_id
-    assert e["reply_markup"]["inline_keyboard"][0][0]["url"] == "https://e.com/11"
+    assert len(env.req.of("editMessageReplyMarkup")) == before
+    dm = [m for m in env.req.of("sendMessage") + env.req.of("sendPhoto") if m["chat_id"] == VIEWER][-1]
+    assert dm["reply_markup"]["inline_keyboard"][0][0]["url"] == "https://e.com/11"
+    assert "Sent to your private chat" in env.req.of("answerCallbackQuery")[-1]["text"]
     await env.send(cb_update(f"back:{d.id}", VIEWER, chat_id=CHANNEL, message_id=card.message_id, chat_type="channel"))
-    assert env.req.of("editMessageReplyMarkup")[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == f"eps:{d.id}:0"
+    assert len(env.req.of("editMessageReplyMarkup")) == before
 
 
 async def test_delete_list_stats(env):

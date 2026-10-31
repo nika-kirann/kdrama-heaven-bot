@@ -81,15 +81,20 @@ async def test_wizard_with_qualities_and_navigation(env):
     post = env.db.card_post(d.id)
     chan = dict(chat_id=CHANNEL, message_id=post.message_id, chat_type="channel")
 
-    # episodes page -> EP buttons are callbacks now
+    # channel tap -> private copy in the viewer's DM, channel post untouched
+    before = len(env.req.of("editMessageReplyMarkup"))
     await env.send(cb_update(f"eps:{d.id}:0", VIEWER, **chan))
-    eb = flat(env.req.of("editMessageReplyMarkup")[-1]["reply_markup"])
+    assert len(env.req.of("editMessageReplyMarkup")) == before
+    dm = env.req.of("sendMessage")[-1]
+    assert dm["chat_id"] == VIEWER
+    eb = flat(dm["reply_markup"])
     assert eb[0]["callback_data"] == f"ep:{d.id}:1:0"
+    chan = dict(chat_id=VIEWER, message_id=101, chat_type="private")  # all further taps happen in the DM
 
-    # EP 1 -> quality keyboard, edited in place on the channel post
+    # EP 1 -> quality keyboard, edited in place on the private message
     await env.send(cb_update(f"ep:{d.id}:1:0", VIEWER, **chan))
     e = env.req.of("editMessageReplyMarkup")[-1]
-    assert e["message_id"] == post.message_id
+    assert e["message_id"] == 101 and e["chat_id"] == VIEWER
     qb = flat(e["reply_markup"])
     labels = [b["text"] for b in qb]
     assert labels[:4] == ["🎞 480p", "🎞 720p (2 parts)", "🎞 1080p", "🎞 4K (2 mirrors)"]
@@ -205,3 +210,60 @@ async def test_migration_from_old_schema(tmp_path, cfg):
     assert db.links_per_quality() == {"HD": 2, "1080p": 1, "480p": 1}
     assert db.card_post(d.id).message_id == 55
     Database(f"sqlite:///{path}")  # re-running the migration is a no-op
+
+
+async def _drama_on_channel(env, n=23):
+    d = await wizard(env, links=f"480p: https://a/{{ep}} 1 {n}\n1080p: https://c/{{ep}} 1 {n}")
+    return d, dict(chat_id=CHANNEL, message_id=env.db.card_post(d.id).message_id, chat_type="channel")
+
+
+async def test_channel_taps_never_edit_channel_post(env):
+    d, chan = await _drama_on_channel(env)
+    for data in (f"eps:{d.id}:0", f"eps:{d.id}:1", f"ep:{d.id}:12:1", f"ql:{d.id}:12:0:1", f"back:{d.id}"):
+        await env.send(cb_update(data, VIEWER, **chan))
+    edits = env.req.of("editMessageReplyMarkup") + env.req.of("editMessageCaption") + env.req.of("editMessageText")
+    assert not [e for e in edits if e.get("chat_id") == CHANNEL and e.get("message_id") == chan["message_id"]]
+    assert all(p["chat_id"] == VIEWER for p in env.req.of("sendMessage")[-5:])
+
+
+async def test_private_navigation_stays_in_dm(env):
+    d, chan = await _drama_on_channel(env)
+    await env.send(cb_update(f"eps:{d.id}:0", VIEWER, **chan))
+    priv = dict(chat_id=VIEWER, message_id=555, chat_type="private")
+    await env.send(cb_update(f"eps:{d.id}:2", VIEWER, **priv))
+    e = env.req.of("editMessageReplyMarkup")[-1]
+    assert (e["chat_id"], e["message_id"]) == (VIEWER, 555)
+    assert [b["text"] for b in flat(e["reply_markup"]) if b["text"].startswith("EP")] == ["EP 21", "EP 22", "EP 23"]
+    await env.send(cb_update(f"ep:{d.id}:22:2", VIEWER, **priv))
+    e = env.req.of("editMessageReplyMarkup")[-1]
+    assert e["chat_id"] == VIEWER and flat(e["reply_markup"])[1]["url"] == "https://c/22"
+
+
+async def test_deep_link_fallback_when_cannot_dm(env):
+    d, chan = await _drama_on_channel(env)
+    env.req.blocked.add(VIEWER)
+    n_edits = len(env.req.of("editMessageReplyMarkup"))
+    await env.send(cb_update(f"eps:{d.id}:1", VIEWER, **chan))
+    ans = env.req.of("answerCallbackQuery")[-1]
+    assert ans["url"] == f"https://t.me/kdrama_heaven_bot?start=drama_{d.id}"
+    assert len(env.req.of("editMessageReplyMarkup")) == n_edits
+    # after /start drama_<id> the viewer gets the private browse card
+    env.req.blocked.clear()
+    await env.send(msg_update(f"/start drama_{d.id}", VIEWER))
+    dm = env.req.of("sendMessage")[-1]
+    assert dm["chat_id"] == VIEWER and flat(dm["reply_markup"])[0]["callback_data"] == f"ep:{d.id}:1:0"
+
+
+async def test_multi_viewer_independence(env):
+    d, chan = await _drama_on_channel(env)
+    a, b = 7, 8
+    await env.send(cb_update(f"eps:{d.id}:2", a, **chan))
+    await env.send(cb_update(f"eps:{d.id}:0", b, **chan))
+    sent = {p["chat_id"]: p for p in env.req.of("sendMessage") if p["chat_id"] in (a, b)}
+    first = lambda p: [x["text"] for x in flat(p["reply_markup"]) if x["text"].startswith("EP")][0]
+    assert first(sent[a]) == "EP 21" and first(sent[b]) == "EP 1"
+    await env.send(cb_update(f"eps:{d.id}:1", a, chat_id=a, message_id=900, chat_type="private"))
+    await env.send(cb_update(f"ep:{d.id}:3:0", b, chat_id=b, message_id=901, chat_type="private"))
+    ea, eb = env.req.of("editMessageReplyMarkup")[-2:]
+    assert (ea["chat_id"], ea["message_id"]) == (a, 900) and (eb["chat_id"], eb["message_id"]) == (b, 901)
+    assert first(ea) == "EP 11" and flat(eb["reply_markup"])[0]["url"] == "https://a/3"

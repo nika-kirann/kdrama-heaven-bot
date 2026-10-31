@@ -15,6 +15,7 @@ class FakeRequest(BaseRequest):
         self.calls = []          # (method, params)
         self.ids = itertools.count(100)
         self.fail_next = {}      # method -> exception json to return once
+        self.blocked = set()     # user ids that never started the bot (DM -> 403)
 
     @property
     def read_timeout(self):
@@ -39,9 +40,12 @@ class FakeRequest(BaseRequest):
                 except ValueError:
                     pass
         self.calls.append((api, params))
+        if api in {"sendMessage", "sendPhoto"} and params.get("chat_id") in self.blocked:
+            return 403, json.dumps({"ok": False, "error_code": 403,
+                                    "description": "Forbidden: bot can't initiate conversation with a user"}).encode()
         if api in self.fail_next:
             err = self.fail_next.pop(api)
-            return 400 if err.get("error_code") == 400 else 429, json.dumps(err).encode()
+            return err.get("error_code", 400), json.dumps(err).encode()
         return 200, json.dumps({"ok": True, "result": self._result(api, params)}).encode()
 
     def _msg(self, params, **extra):

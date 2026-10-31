@@ -1,7 +1,8 @@
 """Viewer side: /start, /browse, /search, episode pagination, drama cards, requests."""
 import logging
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, Forbidden
 from telegram.constants import ParseMode
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -22,8 +23,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if arg == "request":
         context.user_data["awaiting"] = "request"
         return await update.message.reply_text("🙋 Which drama would you like us to add? Send the name.")
-    if arg.startswith("d") and arg[1:].isdigit():
-        d = db.get_drama(int(arg[1:]))
+    did = arg[6:] if arg.startswith("drama_") else arg[1:] if arg.startswith("d") else ""
+    if did.isdigit():
+        d = db.get_drama(int(did))
         if d and not d.deleted:
             return await send_card(update.message, d)
     await update.message.reply_text(WELCOME, parse_mode=ParseMode.HTML, reply_markup=kb.main_menu())
@@ -52,12 +54,40 @@ async def show_search(send, context, text, page):
 
 
 async def send_card(message, d):
-    markup = kb.episodes_keyboard(d, 0) if d.episodes else None
+    await dm_card(message.get_bot(), message.chat_id, d)
+
+
+async def dm_card(bot, chat_id, d, markup=None):
+    """Send a viewer their own private copy of a drama card (with its own keyboard)."""
+    markup = markup or (kb.episodes_keyboard(d, 0) if d.episodes else None)
     if d.poster:
-        await safe_call(message.reply_photo, photo=d.poster, caption=drama_card(d),
-                        parse_mode=ParseMode.HTML, reply_markup=markup)
-    else:
-        await safe_call(message.reply_text, drama_card(d, 4096), parse_mode=ParseMode.HTML, reply_markup=markup)
+        return await safe_call(bot.send_photo, chat_id, photo=d.poster, caption=drama_card(d),
+                               parse_mode=ParseMode.HTML, reply_markup=markup)
+    return await safe_call(bot.send_message, chat_id, drama_card(d, 4096), parse_mode=ParseMode.HTML,
+                           reply_markup=markup)
+
+
+def deep_link(bot, drama_id) -> str:
+    return f"https://t.me/{bot.username}?start=drama_{drama_id}"
+
+
+async def respond(q, context, d, markup, note=None):
+    """Private chats: edit this viewer's own message in place.
+    Channel/group posts: NEVER touch the shared keyboard. DM the viewer a private copy instead,
+    or, if the bot can't DM them yet, answer with a deep link that opens the bot."""
+    if q.message and q.message.chat.type == "private":
+        await q.answer(note)
+        return await safe_call(q.edit_message_reply_markup, reply_markup=markup)
+    try:
+        await dm_card(context.bot, q.from_user.id, d, markup)
+    except (Forbidden, BadRequest) as e:
+        log.info("Can't DM %s (%s); sending deep link", q.from_user.id, e)
+        try:
+            return await q.answer(url=deep_link(context.bot, d.id))
+        except BadRequest:
+            return await q.answer("💜 Start @%s first, then tap again to browse privately." % context.bot.username,
+                                  show_alert=True)
+    await q.answer("📩 Sent to your private chat with the bot, browse there!")
 
 
 async def on_browse(update: Update, context):
@@ -100,7 +130,7 @@ async def on_drama(update: Update, context):
 
 
 async def on_episodes(update: Update, context):
-    """Works both on the channel post (edits its keyboard in place) and on DM cards."""
+    """Channel taps go to the viewer's DM; DM taps edit that private message."""
     db, _, _ = deps(context)
     q = update.callback_query
     _, did, page = q.data.split(":")
@@ -109,8 +139,7 @@ async def on_episodes(update: Update, context):
         return await q.answer("This drama was removed.", show_alert=True)
     if not d.episodes:
         return await q.answer("No episodes yet, stay tuned! 💜", show_alert=True)
-    await q.answer()
-    await safe_call(q.edit_message_reply_markup, reply_markup=kb.episodes_keyboard(d, int(page)))
+    await respond(q, context, d, kb.episodes_keyboard(d, int(page)))
 
 
 async def on_quality(update: Update, context):
@@ -128,17 +157,19 @@ async def on_quality(update: Update, context):
         msg = f"EP {parts[2]}: open each part/mirror"
     if not markup:
         return await q.answer("That episode isn't available anymore.", show_alert=True)
-    await q.answer(msg)
-    await safe_call(q.edit_message_reply_markup, reply_markup=markup)
+    await respond(q, context, d, markup, msg)
 
 
 async def on_back(update: Update, context):
     db, svc, _ = deps(context)
     q = update.callback_query
     d = db.get_drama(int(q.data.split(":")[1]))
-    await q.answer()
-    if d:
-        await safe_call(q.edit_message_reply_markup, reply_markup=kb.card_keyboard(d, svc.username))
+    if not d or d.deleted:
+        return await q.answer()
+    if q.message and q.message.chat.type == "private":
+        await q.answer()
+        return await safe_call(q.edit_message_reply_markup, reply_markup=kb.card_keyboard(d, svc.username))
+    await respond(q, context, d, kb.episodes_keyboard(d, 0) if d.episodes else None)
 
 
 async def on_noop(update: Update, context):
