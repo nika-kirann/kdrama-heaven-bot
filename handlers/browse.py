@@ -113,6 +113,25 @@ async def on_episodes(update: Update, context):
     await safe_call(q.edit_message_reply_markup, reply_markup=kb.episodes_keyboard(d, int(page)))
 
 
+async def on_quality(update: Update, context):
+    db, _, _ = deps(context)
+    q = update.callback_query
+    parts = q.data.split(":")
+    d = db.get_drama(int(parts[1]))
+    if not d or d.deleted:
+        return await q.answer("This drama was removed.", show_alert=True)
+    if parts[0] == "ep":
+        markup = kb.quality_keyboard(d, int(parts[2]), int(parts[3]))
+        msg = f"EP {parts[2]}: pick a quality"
+    else:
+        markup = kb.links_keyboard(d, int(parts[2]), int(parts[3]), int(parts[4]))
+        msg = f"EP {parts[2]}: open each part/mirror"
+    if not markup:
+        return await q.answer("That episode isn't available anymore.", show_alert=True)
+    await q.answer(msg)
+    await safe_call(q.edit_message_reply_markup, reply_markup=markup)
+
+
 async def on_back(update: Update, context):
     db, svc, _ = deps(context)
     q = update.callback_query
@@ -146,5 +165,6 @@ def handlers():
         CommandHandler("start", start), CommandHandler("browse", browse), CommandHandler("search", search_cmd),
         CallbackQueryHandler(on_browse, pattern=r"^br:"), CallbackQueryHandler(on_drama, pattern=r"^dr:\d+$"),
         CallbackQueryHandler(on_episodes, pattern=r"^eps:\d+:\d+$"), CallbackQueryHandler(on_back, pattern=r"^back:\d+$"),
+        CallbackQueryHandler(on_quality, pattern=r"^(ep:\d+:\d+:\d+|ql:\d+:\d+:\d+:\d+)$"),
         CallbackQueryHandler(on_noop, pattern=r"^noop$"), MessageHandler(private_text, on_text),
     ]

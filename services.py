@@ -9,7 +9,7 @@ from telegram.error import TelegramError
 
 import keyboards as kb
 from db import Database, Drama, utcnow
-from utils import h, local_midnight_utc, safe_call
+from utils import describe_links, h, local_midnight_utc, safe_call
 
 log = logging.getLogger(__name__)
 CAPTION_LIMIT = 1024
@@ -19,6 +19,15 @@ def badge(status: str) -> str:
     return "COMPLETED ✅" if status == "Completed" else "ONGOING 🔄"
 
 
+def qualities(d: Drama) -> list[str]:
+    out = []
+    for e in d.episodes:
+        for q, _ in e.quality_groups():
+            if q not in out:
+                out.append(q)
+    return out
+
+
 def drama_card(d: Drama, limit: int = CAPTION_LIMIT) -> str:
     eps = len(d.episodes)
     total = f"/{d.total_episodes}" if d.total_episodes else ""
@@ -26,7 +35,8 @@ def drama_card(d: Drama, limit: int = CAPTION_LIMIT) -> str:
     head = (f"🎬 <b>{h(d.title)}</b>" + (f" ({d.year})" if d.year else "") + "\n"
             f"<b>Status:</b> {badge(d.status)}\n"
             f"<b>Episodes:</b> {eps}{total}\n"
-            + (f"<b>Genres:</b> {h(', '.join(d.genre_list))}\n" if d.genre_list else ""))
+            + (f"<b>Genres:</b> {h(', '.join(d.genre_list))}\n" if d.genre_list else "")
+            + (f"<b>Quality:</b> {h(' / '.join(qualities(d)))}\n" if qualities(d) else ""))
     tail = f"\n\n{h(tags)}\n🆔 <code>{d.id}</code>" if tags else f"\n\n🆔 <code>{d.id}</code>"
     room = limit - len(head) - len(tail) - 10
     syn = d.synopsis or ""
@@ -84,12 +94,16 @@ class ChannelService:
                             text=drama_card(d, 4096), parse_mode=ParseMode.HTML, reply_markup=markup)
         return True
 
-    async def add_episodes(self, drama_id: int, links: list[str], start: int | None = None) -> list[int]:
-        nums = self.db.add_episodes(drama_id, links, start)
+    async def add_episodes(self, drama_id: int, episodes, start: int | None = None) -> list[int]:
+        """episodes: {ep: [(quality, url, kind)]} or a legacy list of URLs."""
+        if isinstance(episodes, list):
+            first = start or max((e.number for e in self.db.get_drama(drama_id).episodes), default=0) + 1
+            episodes = {first + i: [("HD", u, "part")] for i, u in enumerate(episodes)}
+        nums = self.db.add_episodes(drama_id, episodes)
         await self.refresh_card(drama_id)
         d = self.db.get_drama(drama_id)
-        rng = f"{nums[0]}" if len(nums) == 1 else f"{nums[0]}–{nums[-1]}"
-        await self._send(f"🆕 <b>New episodes</b>: {h(d.title)} — EP {rng} added! 📺", "service", drama_id)
+        await self._send(f"🆕 <b>New episodes</b>: {h(d.title)} — {h(describe_links(episodes))} added! 📺",
+                         "service", drama_id)
         return nums
 
     async def complete(self, drama_id: int):

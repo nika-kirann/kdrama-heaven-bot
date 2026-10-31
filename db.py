@@ -31,7 +31,7 @@ class Drama(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
     episodes: Mapped[list["Episode"]] = relationship(
-        back_populates="drama", order_by="Episode.number", cascade="all, delete-orphan")
+        back_populates="drama", order_by="Episode.number", cascade="all, delete-orphan", lazy="selectin")
 
     @property
     def genre_list(self) -> list[str]:
@@ -43,9 +43,36 @@ class Episode(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     drama_id: Mapped[int] = mapped_column(ForeignKey("dramas.id"))
     number: Mapped[int] = mapped_column(Integer)
-    url: Mapped[str] = mapped_column(String(1000))
+    url: Mapped[str] = mapped_column(String(1000))  # legacy single link (kept = first link)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     drama: Mapped[Drama] = relationship(back_populates="episodes")
+    links: Mapped[list["EpisodeLink"]] = relationship(
+        back_populates="episode", order_by="EpisodeLink.position", cascade="all, delete-orphan", lazy="selectin")
+
+    def quality_groups(self) -> list[tuple[str, list["EpisodeLink"]]]:
+        """[(quality, [links...]), ...] in entry order. Legacy rows without link rows -> HD."""
+        if not self.links:
+            return [("HD", [EpisodeLink(quality="HD", url=self.url, kind="part", position=0)])] if self.url else []
+        groups: dict[str, list] = {}
+        for l in self.links:
+            groups.setdefault(l.quality, []).append(l)
+        return list(groups.items())
+
+    @property
+    def link_count(self) -> int:
+        return sum(len(v) for _, v in self.quality_groups())
+
+
+class EpisodeLink(Base):
+    """One download/watch link for an episode in a given quality. kind: part | mirror"""
+    __tablename__ = "episode_links"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    episode_id: Mapped[int] = mapped_column(ForeignKey("episodes.id"))
+    quality: Mapped[str] = mapped_column(String(20), default="HD")
+    url: Mapped[str] = mapped_column(String(1000))
+    kind: Mapped[str] = mapped_column(String(10), default="part")
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    episode: Mapped[Episode] = relationship(back_populates="links")
 
 
 class Post(Base):
@@ -91,14 +118,17 @@ class Database:
 
     # ---- dramas -------------------------------------------------------
     def add_drama(self, **kw) -> Drama:
-        links = kw.pop("links", [])
+        links = kw.pop("links", [])  # legacy: plain list -> HD
         start = kw.pop("start_episode", 1)
+        episodes = kw.pop("episodes", None) or {start + i: [("HD", u, "part")] for i, u in enumerate(links)}
         with self.session() as s:
             d = Drama(**kw)
-            d.episodes = [Episode(number=start + i, url=u) for i, u in enumerate(links)]
             s.add(d)
             s.commit()
-            return self.get_drama(d.id)
+            did = d.id
+        if episodes:
+            self.add_episodes(did, episodes)
+        return self.get_drama(did)
 
     def get_drama(self, drama_id: int) -> Drama | None:
         with self.session() as s:
@@ -128,24 +158,66 @@ class Database:
             s.commit()
         return self.get_drama(drama_id)
 
-    def add_episodes(self, drama_id: int, links: list[str], start: int | None = None) -> list[int]:
+    def add_episodes(self, drama_id: int, episodes, start: int | None = None) -> list[int]:
+        """episodes: {ep_number: [(quality, url, kind), ...]} or a legacy list of URLs.
+        For an existing episode, the qualities given replace that quality's links; others are kept."""
         with self.session() as s:
             d = s.get(Drama, drama_id)
-            last = max((e.number for e in d.episodes), default=0)
-            start = start or last + 1
-            nums = []
-            for i, u in enumerate(links):
-                n = start + i
-                existing = next((e for e in d.episodes if e.number == n), None)
-                if existing:
-                    existing.url = u
-                else:
-                    d.episodes.append(Episode(number=n, url=u))
-                nums.append(n)
-            if d.total_episodes and max(nums, default=0) > d.total_episodes:
-                d.total_episodes = max(nums)
+            if isinstance(episodes, list):
+                first = start or max((e.number for e in d.episodes), default=0) + 1
+                episodes = {first + i: [("HD", u, "part")] for i, u in enumerate(episodes)}
+            by_num = {e.number: e for e in d.episodes}
+            for n in sorted(episodes):
+                links = episodes[n]
+                ep = by_num.get(n)
+                if not ep:
+                    ep = Episode(number=n, url=links[0][1])
+                    d.episodes.append(ep)
+                    by_num[n] = ep
+                elif not ep.links and ep.url:  # legacy row: materialise its link as HD first
+                    ep.links.append(EpisodeLink(quality="HD", url=ep.url, kind="part", position=0))
+                quals = {q for q, _, _ in links}
+                ep.links = [l for l in ep.links if l.quality not in quals]
+                pos = max((l.position for l in ep.links), default=-1) + 1
+                for i, (q, u, kind) in enumerate(links):
+                    ep.links.append(EpisodeLink(quality=q, url=u, kind=kind, position=pos + i))
+                ep.url = ep.links[0].url
+            nums = sorted(episodes)
+            if d.total_episodes and nums and nums[-1] > d.total_episodes:
+                d.total_episodes = nums[-1]
+            d.updated_at = utcnow()
             s.commit()
             return nums
+
+    def rename_quality(self, drama_id: int, old: str, new: str | None) -> int:
+        """Rename a quality on all episodes of a drama, or delete it when new is None."""
+        n = 0
+        with self.session() as s:
+            d = s.get(Drama, drama_id)
+            for ep in list(d.episodes):
+                if not ep.links and ep.url and old.lower() == "hd":
+                    ep.links.append(EpisodeLink(quality="HD", url=ep.url, kind="part", position=0))
+                for l in list(ep.links):
+                    if l.quality.lower() == old.lower():
+                        n += 1
+                        if new:
+                            l.quality = new
+                        else:
+                            ep.links.remove(l)
+                if ep.links:
+                    ep.url = ep.links[0].url
+                elif new is None:
+                    d.episodes.remove(ep)
+            s.commit()
+        return n
+
+    def links_per_quality(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for d in self.list_dramas(limit=100_000)[0]:
+            for ep in d.episodes:
+                for q, ls in ep.quality_groups():
+                    out[q] = out.get(q, 0) + len(ls)
+        return out
 
     def mark_deleted(self, drama_id: int) -> None:
         self.update_drama(drama_id, deleted=True)

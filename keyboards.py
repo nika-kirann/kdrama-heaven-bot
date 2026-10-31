@@ -1,5 +1,7 @@
 """Inline keyboards. Callback data formats:
   eps:<drama_id>:<page>   episode page on a drama card
+  ep:<drama_id>:<ep>:<page>          quality picker for one episode
+  ql:<drama_id>:<ep>:<qidx>:<page>   parts/mirrors of one quality
   back:<drama_id>         back to the card's main keyboard
   dr:<drama_id>           open a drama card (DM)
   br:<kind>:<page>[:arg]  browse lists (ongoing|completed|latest|genre|search|genres)
@@ -28,7 +30,11 @@ def episodes_keyboard(drama, page: int = 0, per_page: int = PER_PAGE) -> M:
     chunk = eps[page * per_page:(page + 1) * per_page]
     rows, row = [], []
     for e in chunk:
-        row.append(B(f"EP {e.number}", url=e.url))
+        groups = e.quality_groups()
+        if len(groups) == 1 and len(groups[0][1]) == 1:  # single link (incl. legacy): open directly
+            row.append(B(f"EP {e.number}", url=groups[0][1][0].url))
+        else:
+            row.append(B(f"EP {e.number}", callback_data=f"ep:{drama.id}:{e.number}:{page}"))
         if len(row) == 5:
             rows.append(row)
             row = []
@@ -77,3 +83,46 @@ def genres_keyboard(genres) -> M:
 
 def status_keyboard() -> M:
     return M([[B("🔄 Ongoing", callback_data="st:Ongoing"), B("✅ Completed", callback_data="st:Completed")]])
+
+
+def _episode(drama, number):
+    return next((e for e in drama.episodes if e.number == number), None)
+
+
+def quality_keyboard(drama, number: int, page: int = 0) -> M | None:
+    ep = _episode(drama, number)
+    if not ep:
+        return None
+    rows, row = [], []
+    for qi, (q, links) in enumerate(ep.quality_groups()):
+        if len(links) == 1:
+            row.append(B(f"🎞 {q}", url=links[0].url))
+        else:
+            what = "mirrors" if links[0].kind == "mirror" else "parts"
+            row.append(B(f"🎞 {q} ({len(links)} {what})", callback_data=f"ql:{drama.id}:{number}:{qi}:{page}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([B(f"↩️ Back (EP {number})", callback_data=f"eps:{drama.id}:{page}")])
+    return M(rows)
+
+
+def links_keyboard(drama, number: int, qidx: int, page: int = 0) -> M | None:
+    ep = _episode(drama, number)
+    groups = ep.quality_groups() if ep else []
+    if qidx >= len(groups):
+        return None
+    q, links = groups[qidx]
+    word = "Mirror" if links[0].kind == "mirror" else "Part"
+    rows, row = [], []
+    for i, l in enumerate(links, 1):
+        row.append(B(f"{q} {word} {i}", url=l.url))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([B("↩️ Qualities", callback_data=f"ep:{drama.id}:{number}:{page}")])
+    return M(rows)

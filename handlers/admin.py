@@ -6,11 +6,11 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 import jobs
 import keyboards as kb
-from utils import URL_RE, h, local_midnight_utc, parse_local_dt
+from utils import URL_RE, describe_links, h, local_midnight_utc, norm_quality, parse_local_dt, parse_quality_links
 from .common import admin_only, arg_text, deps
 
 log = logging.getLogger(__name__)
-EDIT_FIELDS = {"title", "synopsis", "genres", "year", "poster", "total", "status", "repost"}
+EDIT_FIELDS = {"title", "synopsis", "genres", "year", "poster", "total", "status", "repost", "links", "quality"}
 
 
 @admin_only
@@ -33,12 +33,34 @@ async def edit(update: Update, context):
     parts = args.split(maxsplit=2)
     if len(parts) < 2 or not parts[0].isdigit() or parts[1].lower() not in EDIT_FIELDS:
         return await update.message.reply_text(
-            "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, total, status, repost\n"
-            "Example: /edit 3 year 2024")
+            "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, total, status, repost, links, quality\n"
+            "Examples:\n/edit 3 year 2024\n/edit 3 quality 520p 720p   (rename; use - to delete a quality)\n"
+            "/edit 3 links\nEP 5\n1080p: https://x/ep5.mkv\n(replaces those qualities for those episodes)")
     d = db.find_drama(parts[0])
     if not d:
         return await update.message.reply_text("No drama with that id.")
     field, value = parts[1].lower(), (parts[2] if len(parts) > 2 else "").strip()
+    if field == "links":
+        try:
+            eps = parse_quality_links(value, None, start=1)
+        except ValueError as e:
+            return await update.message.reply_text(f"⚠️ {e}")
+        if not eps:
+            return await update.message.reply_text("Put the links on the lines after /edit <id> links (start with 'EP n').")
+        db.add_episodes(d.id, eps)
+        await svc.refresh_card(d.id)
+        return await update.message.reply_text(f"🔗 Updated links {describe_links(eps)} for {d.title}; channel post edited.")
+    if field == "quality":
+        bits = value.split()
+        if len(bits) != 2:
+            return await update.message.reply_text("Usage: /edit <id> quality <old> <new>   or   /edit <id> quality <old> -")
+        new = None if bits[1] == "-" else norm_quality(bits[1])
+        n = db.rename_quality(d.id, norm_quality(bits[0]), new)
+        if not n:
+            return await update.message.reply_text(f"No {bits[0]} links on {d.title}.")
+        await svc.refresh_card(d.id)
+        return await update.message.reply_text(
+            f"🎞 {'Renamed' if new else 'Removed'} {n} {norm_quality(bits[0])} links" + (f" → {new}" if new else "") + ".")
     if field == "repost":
         await svc.post_card(d)
         return await update.message.reply_text("📤 Reposted the card to the channel.")
@@ -118,7 +140,9 @@ async def stats(update: Update, context):
         "📊 <b>kdrama_heaven stats</b>\n"
         f"Dramas: {s['dramas']} (🔄 {s['ongoing']} ongoing / ✅ {s['completed']} completed)\n"
         f"Episodes: {s['episodes']}\nPosts today: {s['posts_today']}\n"
-        f"Requests: {s['requests']}\nPending schedules: {s['pending_schedules']}", parse_mode="HTML")
+        f"Requests: {s['requests']}\nPending schedules: {s['pending_schedules']}"
+        + ("\nLinks per quality: " + ", ".join(f"{h(q)} {n}" for q, n in db.links_per_quality().items())
+           if db.links_per_quality() else ""), parse_mode="HTML")
 
 
 @admin_only

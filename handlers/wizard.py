@@ -6,13 +6,21 @@ from telegram.ext import (CallbackQueryHandler, CommandHandler, ContextTypes,
                           ConversationHandler, MessageHandler, filters)
 
 import keyboards as kb
-from utils import URL_RE, h, parse_links
+from utils import URL_RE, describe_links, h, parse_quality_links
 from .common import admin_only, arg_text, deps
 
 log = logging.getLogger(__name__)
 TITLE, POSTER, SYNOPSIS, GENRES, YEAR, STATUS, TOTAL, LINKS = range(8)
 EP_LINKS = 20
 SKIP = "(send /skip to leave it empty)"
+LINK_HELP = (
+    "<b>Format</b> (mix freely, one episode per line inside a quality):\n"
+    "<code>480p: https://a/ep1.mp4</code>\n"
+    "<code>720p: https://b/ep1-part1, https://b/ep1-part2</code>  ← parts\n"
+    "<code>1080p: https://c/ep1 | https://mirror/ep1</code>  ← mirrors\n"
+    "<code>1080p: https://ex.com/{ep}.mkv 1 16</code>  ← pattern (start end)\n"
+    "or a block: a line <code>720p</code> then one URL line per episode.\n"
+    "Plain URLs without a quality are saved as HD. Defaults: 480p / 720p / 1080p, any label works.")
 
 
 @admin_only
@@ -113,12 +121,8 @@ async def got_total(update, context):
 
 
 async def ask_links(update):
-    await update.message.reply_text(
-        "🔗 <b>Episode links</b>. Either:\n"
-        "• one link per line (EP 1, EP 2, …), or\n"
-        "• a pattern with <code>{ep}</code> plus optional start and end episode, e.g.\n"
-        "<code>https://example.com/drama/{ep}.mp4 1 16</code>\n"
-        "(end defaults to total episodes) " + SKIP, parse_mode="HTML")
+    await update.message.reply_text("🔗 <b>Episode links by quality</b>, starting at EP 1.\n" + LINK_HELP + "\n" + SKIP,
+                                    parse_mode="HTML")
     return LINKS
 
 
@@ -129,25 +133,27 @@ async def skip_total(update, context):
 async def got_links(update, context):
     draft = context.user_data["draft"]
     try:
-        links, start = parse_links(update.message.text, draft.get("total_episodes"))
+        eps = parse_quality_links(update.message.text, draft.get("total_episodes"))
     except ValueError as e:
         await update.message.reply_text(f"⚠️ {e}. Try again or /skip.")
         return LINKS
-    return await finish(update, context, links, start or 1)
+    return await finish(update, context, eps)
 
 
 async def skip_links(update, context):
-    return await finish(update, context, [], 1)
+    return await finish(update, context, {})
 
 
-async def finish(update, context, links, start):
+async def finish(update, context, eps):
     db, svc, _ = deps(context)
     draft = context.user_data.pop("draft")
     draft.setdefault("status", "Ongoing")
-    d = db.add_drama(**draft, links=links, start_episode=start)
+    if eps and draft.get("total_episodes") and max(eps) > draft["total_episodes"]:
+        draft["total_episodes"] = max(eps)
+    d = db.add_drama(**draft, episodes=eps)
     try:
         await svc.post_card(d)
-        await update.message.reply_text(f"✅ Posted <b>{h(d.title)}</b> (id {d.id}) with {len(d.episodes)} episodes.",
+        await update.message.reply_text(f"✅ Posted <b>{h(d.title)}</b> (id {d.id}) with {len(d.episodes)} episodes: {h(describe_links(eps))}.",
                                         parse_mode="HTML")
     except Exception as e:
         log.exception("Posting card failed")
@@ -179,7 +185,7 @@ async def addep_start(update: Update, context):
     last = max((e.number for e in d.episodes), default=0)
     await update.message.reply_text(
         f"Adding to <b>{h(d.title)}</b> (has {len(d.episodes)} eps, next is EP {last + 1}).\n"
-        "Send links one per line, or a pattern like <code>https://x/{ep}.mp4 9 10</code>", parse_mode="HTML")
+        f"Send links by quality, numbered from EP {last + 1}.\n" + LINK_HELP, parse_mode="HTML")
     return EP_LINKS
 
 
@@ -190,19 +196,18 @@ async def addep_links(update, context):
 async def _do_addep(update, context, drama_id, text):
     db, svc, _ = deps(context)
     d = db.get_drama(drama_id)
+    last = max((e.number for e in d.episodes), default=0)
     try:
-        links, start = parse_links(text, None)
-        if "{ep}" in text and len(text.split()) < 3:
-            raise ValueError("For /addep patterns give start and end, e.g. https://x/{ep}.mp4 9 10")
+        eps = parse_quality_links(text, None, start=last + 1)
     except ValueError as e:
         context.user_data["addep"] = drama_id
-        await update.message.reply_text(f"⚠️ {e}")
+        await update.message.reply_text(f"⚠️ {e}. Try again or /cancel.")
         return EP_LINKS
-    if not links:
+    if not eps:
         await update.message.reply_text("No links given.")
         return ConversationHandler.END
-    nums = await svc.add_episodes(d.id, links, start)
-    await update.message.reply_text(f"✅ Added EP {nums[0]}–{nums[-1]} to {d.title}; channel post updated.")
+    await svc.add_episodes(d.id, eps)
+    await update.message.reply_text(f"✅ Added {describe_links(eps)} to {d.title}; channel post updated.")
     return ConversationHandler.END
 
 
