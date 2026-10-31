@@ -1,0 +1,17 @@
+# systemd unit: sudo cp kdrama-bot.service /etc/systemd/system/ && edit paths/user, then
+#   sudo systemctl daemon-reload && sudo systemctl enable --now kdrama-bot
+[Unit]
+Description=kdrama_heaven Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/kdrama-bot
+ExecStart=/home/YOUR_USER/kdrama-bot/.venv/bin/python main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
