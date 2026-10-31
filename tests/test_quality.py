@@ -63,7 +63,7 @@ async def test_parse_errors(bad):
 # ---------- wizard + navigation ----------
 async def wizard(env, links=MIXED, title="Lovely Runner"):
     s = env.send
-    for step in ["/add", title, "/skip", "/skip", "/skip", "/skip"]:
+    for step in ["/add", title, "/skip", "/skip", "/skip", "/skip", "/skip"]:
         await s(msg_update(step, ADMIN))
     await s(cb_update("st:Ongoing", ADMIN))
     await s(msg_update("2", ADMIN))
@@ -77,7 +77,7 @@ async def test_wizard_with_qualities_and_navigation(env):
     ep1 = d.episodes[0]
     assert [q for q, _ in ep1.quality_groups()] == ["480p", "720p", "1080p", "4K"]
     card = [p for p in env.req.of("sendMessage") if p["chat_id"] == CHANNEL][0]
-    assert card["chat_id"] == CHANNEL and "Quality:</b> 480p / 720p / 1080p / 4K" in card["text"]
+    assert card["chat_id"] == CHANNEL and "<b>Quality</b> · <code>480p 720p 1080p 4K</code>" in card["text"]
     post = env.db.card_post(d.id)
     chan = dict(chat_id=CHANNEL, message_id=post.message_id, chat_type="channel")
 
@@ -136,7 +136,7 @@ async def test_addep_with_qualities_edits_post(env):
     ep3 = d.episodes[-1]
     assert ep3.number == 3 and [q for q, _ in ep3.quality_groups()] == ["480p", "1080p"]
     edit = env.req.of("editMessageCaption") or env.req.of("editMessageText")
-    assert edit[-1]["message_id"] == post.message_id and "Episodes:</b> 3" in (edit[-1].get("text") or edit[-1].get("caption"))
+    assert edit[-1]["message_id"] == post.message_id and "<b>Episodes</b> · <code>3" in (edit[-1].get("text") or edit[-1].get("caption"))
     ann = [p for p in env.req.of("sendMessage") if p["chat_id"] == CHANNEL][-1]
     assert "New episodes" in ann["text"] and "EP 3 (480p, 1080p)" in ann["text"]
     # add a missing quality to an existing episode with an EP header; others kept

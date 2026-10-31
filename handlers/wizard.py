@@ -10,7 +10,7 @@ from utils import URL_RE, describe_links, h, parse_quality_links
 from .common import admin_only, arg_text, deps
 
 log = logging.getLogger(__name__)
-TITLE, POSTER, SYNOPSIS, GENRES, YEAR, STATUS, TOTAL, LINKS = range(8)
+TITLE, POSTER, SYNOPSIS, GENRES, YEAR, STATUS, TOTAL, LINKS, AUDIO = range(9)
 EP_LINKS = 20
 SKIP = "(send /skip to leave it empty)"
 LINK_HELP = (
@@ -89,6 +89,35 @@ async def got_year(update, context):
         await update.message.reply_text("Please send a 4-digit year like 2024, or /skip.")
         return YEAR
     context.user_data["draft"]["year"] = int(t)
+    return await ask_audio(update)
+
+
+async def ask_audio(update):
+    await update.message.reply_text(
+        "🔊 <b>Audio / subs</b>, comma separated (default: Korean, Eng Sub). "
+        "Optionally add an IMDb rating: <code>Korean, Eng Sub | 8.2</code> " + SKIP, parse_mode="HTML")
+    return AUDIO
+
+
+async def got_audio(update, context):
+    raw = update.message.text.strip()
+    audio, _, imdb = raw.partition("|")
+    if not imdb and raw.replace(".", "", 1).isdigit():
+        audio, imdb = "", raw
+    draft = context.user_data["draft"]
+    a = ", ".join(p.strip() for p in audio.replace("/", ",").split(",") if p.strip())
+    if a:
+        draft["audio"] = a[:100]
+    imdb = imdb.lower().replace("imdb", "").split("/")[0].strip()
+    if imdb:
+        if not (imdb.replace(".", "", 1).isdigit() and 0 <= float(imdb) <= 10):
+            await update.message.reply_text("IMDb must be a number like 8.2. Try again or /skip.")
+            return AUDIO
+        draft["imdb"] = imdb
+    return await ask_status(update)
+
+
+async def skip_audio(update, context):
     return await ask_status(update)
 
 
@@ -98,7 +127,7 @@ async def ask_status(update):
 
 
 async def skip_year(update, context):
-    return await ask_status(update)
+    return await ask_audio(update)
 
 
 async def got_status(update, context):
@@ -222,6 +251,7 @@ def handlers():
             SYNOPSIS: [MessageHandler(text, got_synopsis), CommandHandler("skip", skip_synopsis)],
             GENRES: [MessageHandler(text, got_genres), CommandHandler("skip", skip_genres)],
             YEAR: [MessageHandler(text, got_year), CommandHandler("skip", skip_year)],
+            AUDIO: [MessageHandler(text, got_audio), CommandHandler("skip", skip_audio)],
             STATUS: [CallbackQueryHandler(got_status, pattern=r"^st:")],
             TOTAL: [MessageHandler(text, got_total), CommandHandler("skip", skip_total)],
             LINKS: [MessageHandler(text, got_links), CommandHandler("skip", skip_links)],

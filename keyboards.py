@@ -16,9 +16,10 @@ PER_PAGE = 10
 
 
 def card_keyboard(drama, bot_username: str | None = None) -> M:
-    rows = [[B(f"📺 Browse episodes ({len(drama.episodes)})", callback_data=f"eps:{drama.id}:0")]]
+    n = len(drama.episodes)
+    rows = [[B(f"▶️ Browse & Download · {n} EP" if n else "▶️ Browse episodes", callback_data=f"eps:{drama.id}:0")]]
     if bot_username:
-        rows.append([B("🙋 Request a drama", url=f"https://t.me/{bot_username}?start=request"),
+        rows.append([B("💌 Request drama", url=f"https://t.me/{bot_username}?start=request"),
                      B("🔎 Search", url=f"https://t.me/{bot_username}?start=browse")])
     return M(rows)
 

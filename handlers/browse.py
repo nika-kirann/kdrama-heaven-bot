@@ -27,7 +27,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if did.isdigit():
         d = db.get_drama(int(did))
         if d and not d.deleted:
-            return await send_card(update.message, d)
+            return await send_card(update.message, d, context.bot_data.get("svc"))
     await update.message.reply_text(WELCOME, parse_mode=ParseMode.HTML, reply_markup=kb.main_menu())
 
 
@@ -53,17 +53,18 @@ async def show_search(send, context, text, page):
                reply_markup=kb.drama_list(dramas, total, page, "br:search", text[:40]))
 
 
-async def send_card(message, d):
-    await dm_card(message.get_bot(), message.chat_id, d)
+async def send_card(message, d, svc=None):
+    await dm_card(message.get_bot(), message.chat_id, d, svc=svc)
 
 
-async def dm_card(bot, chat_id, d, markup=None):
+async def dm_card(bot, chat_id, d, markup=None, svc=None):
     """Send a viewer their own private copy of a drama card (with its own keyboard)."""
+    card = svc.card if svc else drama_card
     markup = markup or (kb.episodes_keyboard(d, 0) if d.episodes else None)
     if d.poster:
-        return await safe_call(bot.send_photo, chat_id, photo=d.poster, caption=drama_card(d),
+        return await safe_call(bot.send_photo, chat_id, photo=d.poster, caption=card(d),
                                parse_mode=ParseMode.HTML, reply_markup=markup)
-    return await safe_call(bot.send_message, chat_id, drama_card(d, 4096), parse_mode=ParseMode.HTML,
+    return await safe_call(bot.send_message, chat_id, card(d, 4096), parse_mode=ParseMode.HTML,
                            reply_markup=markup)
 
 
@@ -79,7 +80,7 @@ async def respond(q, context, d, markup, note=None):
         await q.answer(note)
         return await safe_call(q.edit_message_reply_markup, reply_markup=markup)
     try:
-        await dm_card(context.bot, q.from_user.id, d, markup)
+        await dm_card(context.bot, q.from_user.id, d, markup, svc=context.bot_data.get("svc"))
     except (Forbidden, BadRequest) as e:
         log.info("Can't DM %s (%s); sending deep link", q.from_user.id, e)
         try:
@@ -126,7 +127,7 @@ async def on_drama(update: Update, context):
     if not d or d.deleted:
         return await q.answer("That drama is no longer available.", show_alert=True)
     await q.answer()
-    await send_card(q.message, d)
+    await send_card(q.message, d, context.bot_data.get("svc"))
 
 
 async def on_episodes(update: Update, context):

@@ -28,6 +28,8 @@ class Drama(Base):
     year: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="Ongoing")
     total_episodes: Mapped[int | None] = mapped_column(Integer)
+    audio: Mapped[str | None] = mapped_column(String(100))  # e.g. "Korean, Eng Sub"; None = default
+    imdb: Mapped[str | None] = mapped_column(String(10))    # e.g. "8.2"
     deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -131,6 +133,10 @@ class Database:
         if "poster_msg_id" not in cols:
             with self.engine.begin() as c:
                 c.execute(text("ALTER TABLE dramas ADD COLUMN poster_msg_id INTEGER"))
+        for col, typ in (("audio", "VARCHAR(100)"), ("imdb", "VARCHAR(10)")):
+            if col not in cols:
+                with self.engine.begin() as c:
+                    c.execute(text(f"ALTER TABLE dramas ADD COLUMN {col} {typ}"))
 
     def reload(self):
         """Re-open the file after it was replaced (e.g. restored from Telegram)."""

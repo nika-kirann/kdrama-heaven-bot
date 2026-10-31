@@ -186,7 +186,7 @@ async def test_poster_round_trip_via_wizard(tmp_path):
     from telegram import Update
     from tests.fakes import cb_update
     for u in [msg_update("/add", ADMIN), msg_update("Lovely Runner", ADMIN), msg_update(user_id=ADMIN, photo=True),
-              msg_update("/skip", ADMIN), msg_update("/skip", ADMIN), msg_update("/skip", ADMIN),
+              msg_update("/skip", ADMIN), msg_update("/skip", ADMIN), msg_update("/skip", ADMIN), msg_update("/skip", ADMIN),
               cb_update("st:Ongoing", ADMIN), msg_update("1", ADMIN), msg_update("720p: https://ex.com/1.mp4", ADMIN)]:
         await app.process_update(Update.de_json(u, app.bot))
     photos = req.of("sendPhoto")

@@ -7,6 +7,7 @@ import pytest_asyncio
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 os.environ.pop("BOT_TOKEN", None)
+os.environ["GENERATE_BANNER"] = "0"  # banner covered by its own tests
 
 from telegram import Update  # noqa: E402
 from telegram.ext import Application  # noqa: E402

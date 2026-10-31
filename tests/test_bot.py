@@ -25,6 +25,7 @@ async def add_drama_via_wizard(env, title="Queen of <Tears>", links="https://exa
     await s(msg_update("A chaebol heiress & her husband… <b>drama</b>", ADMIN))
     await s(msg_update("romance, comedy", ADMIN))
     await s(msg_update("2024", ADMIN))
+    await s(msg_update("/skip", ADMIN))  # audio
     await s(cb_update("st:Ongoing", ADMIN))
     await s(msg_update("16", ADMIN))
     await s(msg_update(links, ADMIN))
@@ -81,6 +82,7 @@ async def test_wizard_validation_and_skip(env):
     await s(msg_update("nineteen", ADMIN))
     assert "4-digit year" in last_text(env)
     await s(msg_update("/skip", ADMIN))
+    await s(msg_update("/skip", ADMIN))  # audio
     await s(cb_update("st:Completed", ADMIN))
     await s(msg_update("/skip", ADMIN))
     await s(msg_update("bad link", ADMIN))
@@ -104,7 +106,7 @@ async def test_addep_edits_post_and_announces(env):
     await env.send(msg_update(f"/addep {d.id}", ADMIN))
     await env.send(msg_update("https://e.com/9\nhttps://e.com/10", ADMIN))
     edit = env.req.of("editMessageCaption")[-1]
-    assert edit["message_id"] == card.message_id and "Episodes:</b> 10/16" in edit["caption"]
+    assert edit["message_id"] == card.message_id and "<b>Episodes</b> · <code>10/16</code>" in edit["caption"]
     ann = env.req.of("sendMessage")[-2]
     assert ann["chat_id"] == CHANNEL and "New episodes" in ann["text"] and "EP 9–10" in ann["text"]
     # inline form

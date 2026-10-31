@@ -84,6 +84,15 @@ Add an `EP 9` line to jump to episode 9. Plain URLs with no quality are saved as
 - Episode buttons are shared by every viewer of a channel post, so if one person turns the page, everyone sees that page. Each card has a Back button.
 - Schedules are stored in SQLite and restored on startup. Any that were missed while the bot was offline are posted right after it starts.
 
+## Channel card style
+
+New posts and `/edit <id> repost` use the aesthetic card (see `samples/`): title, year, a boxed info panel (Status, Episodes, Audio, Quality, IMDb), genre hashtags, an expandable synopsis and a `Powered by` footer. The main button is **▶️ Browse & Download · N EP**, plus 💌 Request drama and 🔎 Search.
+- Dramas without a poster get a generated navy/purple banner (Pillow, bundled DejaVu fonts, text only). It's redrawn when the status or episode count changes. `GENERATE_BANNER=0` turns it off.
+- `DEFAULT_AUDIO` (default `Korean, Eng Sub`) and `BRAND` (footer handle, defaults to `CHANNEL_ID` if it's an @username, otherwise `@kdrama_heaven`) are optional env vars.
+- `/add` has an optional **Audio** step after Year: `Korean, Eng Sub | 8.2` sets audio and IMDb (or /skip).
+- `/edit <id> audio Korean, Hindi Dub` and `/edit <id> imdb 8.4` (`-` clears it).
+- Existing posts keep their old look until edited or reposted.
+
 ## Private browsing
 
 Channel post keyboards are shared by everyone, so the channel card only ever shows **Browse episodes / Request / Search**. Tapping Browse (or any episode/quality button on a channel post) never edits the post: the bot DMs that viewer their own copy of the card, and all episode → quality → parts/mirrors, Prev/Next and Back taps edit that private message. If the viewer hasn't started the bot yet, the tap opens `t.me/<bot>?start=drama_<id>`, and after /start they get the private card.

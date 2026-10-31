@@ -19,6 +19,7 @@ def badge(status: str) -> str:
     return "COMPLETED ✅" if status == "Completed" else "ONGOING 🔄"
 
 
+
 def qualities(d: Drama) -> list[str]:
     out = []
     for e in d.episodes:
@@ -28,24 +29,54 @@ def qualities(d: Drama) -> list[str]:
     return out
 
 
-def drama_card(d: Drama, limit: int = CAPTION_LIMIT) -> str:
+LINE = "─" * 18
+DEFAULT_AUDIO = "Korean, Eng Sub"
+
+
+def _tag(text: str) -> str:
+    return "#" + "".join(ch for ch in text.title() if ch.isalnum())
+
+
+def audio_tags(d: Drama, default: str = DEFAULT_AUDIO) -> str:
+    parts = [p.strip() for p in (getattr(d, "audio", None) or default or "").replace("/", ",").split(",") if p.strip()]
+    return " ".join(f"[{p}]" for p in parts)
+
+
+def _clip(text: str, room: int) -> str:
+    """Cut text so its HTML-escaped length fits in room, on a word boundary, with an ellipsis."""
+    if len(h(text)) <= room:
+        return text
+    cut = text[: max(0, room)]
+    while cut and len(h(cut)) > room - 1:
+        cut = cut[:-1]
+    if " " in cut[-25:]:
+        cut = cut[: cut.rfind(" ")]
+    return cut.rstrip(" ,.;:-") + "…" if cut else ""
+
+
+def drama_card(d: Drama, limit: int = CAPTION_LIMIT, brand: str = "@kdrama_heaven",
+               default_audio: str = DEFAULT_AUDIO) -> str:
+    """Aesthetic HTML card (fits Telegram's 1024 caption / 4096 text limit)."""
     eps = len(d.episodes)
     total = f"/{d.total_episodes}" if d.total_episodes else ""
-    tags = " ".join("#" + "".join(ch for ch in g.title() if ch.isalnum()) for g in d.genre_list)
-    head = (f"🎬 <b>{h(d.title)}</b>" + (f" ({d.year})" if d.year else "") + "\n"
-            f"<b>Status:</b> {badge(d.status)}\n"
-            f"<b>Episodes:</b> {eps}{total}\n"
-            + (f"<b>Genres:</b> {h(', '.join(d.genre_list))}\n" if d.genre_list else "")
-            + (f"<b>Quality:</b> {h(' / '.join(qualities(d)))}\n" if qualities(d) else ""))
-    tail = f"\n\n{h(tags)}\n🆔 <code>{d.id}</code>" if tags else f"\n\n🆔 <code>{d.id}</code>"
-    room = limit - len(head) - len(tail) - 10
-    syn = d.synopsis or ""
-    if len(h(syn)) > room:
-        syn = syn[: max(0, room - 1)]
-        while len(h(syn)) > room - 1 and syn:
-            syn = syn[:-1]
-        syn += "…"
-    return head + (f"\n📝 {h(syn)}" if syn else "") + tail
+    q = qualities(d)
+    sub = " · ".join(x for x in [str(d.year) if d.year else "", "K-Drama"] if x)
+    rows = [("Status", f"<code>{badge(d.status)}</code>"),
+            ("Episodes", f"<code>{eps}{total}</code>")]
+    au = audio_tags(d, default_audio)
+    if au:
+        rows.append(("Audio", f"<code>{h(au)}</code>"))
+    if q:
+        rows.append(("Quality", f"<code>{h(' '.join(q))}</code>"))
+    if getattr(d, "imdb", None):
+        rows.append(("IMDb", f"⭐ {h(d.imdb)}/10"))
+    head = (f"✦ <b>{h(d.title)}</b> ✦\n<i>{h(sub)}</i>\n\n╭{LINE}\n"
+            + "".join(f"├ <b>{k}</b> · {v}\n" for k, v in rows) + f"╰{LINE}\n")
+    tags = " ".join(_tag(g) for g in d.genre_list)
+    tail = (f"\n{h(tags)}" if tags else "") + f"\n\n✦ <b>Powered by</b> {h(brand)}  ·  <code>#{d.id}</code>"
+    room = limit - len(head) - len(tail) - len("\n<blockquote expandable></blockquote>") - 2
+    syn = _clip((d.synopsis or "").strip(), room) if room > 20 else ""
+    return head + (f"\n<blockquote expandable>{h(syn)}</blockquote>" if syn else "") + tail
 
 
 class ChannelService:
@@ -77,14 +108,29 @@ class ChannelService:
         self.db.add_post(msg.chat_id, msg.message_id, kind, drama_id)
         return msg
 
+    def card(self, d: Drama, limit: int = CAPTION_LIMIT) -> str:
+        return drama_card(d, limit, brand=self.cfg.brand_handle, default_audio=self.cfg.default_audio)
+
+    def banner(self, d: Drama) -> bytes | None:
+        if not getattr(self.cfg, "banner", False):
+            return None
+        try:
+            from banner import render_banner
+            return render_banner(d.title, d.status, d.genre_list, d.year, len(d.episodes), d.total_episodes,
+                                 qualities(d), self.cfg.brand_handle)
+        except Exception as e:  # Pillow missing or font issue -> plain text post
+            log.warning("Banner render failed: %s", e)
+            return None
+
     async def post_card(self, d: Drama):
         markup = kb.card_keyboard(d, self.username)
-        if d.poster:
-            msg = await safe_call(self.bot.send_photo, chat_id=self.cfg.channel_id, photo=d.poster,
-                                  caption=drama_card(d), parse_mode=ParseMode.HTML, reply_markup=markup)
+        photo = d.poster or self.banner(d)
+        if photo:
+            msg = await safe_call(self.bot.send_photo, chat_id=self.cfg.channel_id, photo=photo,
+                                  caption=self.card(d), parse_mode=ParseMode.HTML, reply_markup=markup)
             photo = True
         else:
-            msg = await safe_call(self.bot.send_message, chat_id=self.cfg.channel_id, text=drama_card(d, 4096),
+            msg = await safe_call(self.bot.send_message, chat_id=self.cfg.channel_id, text=self.card(d, 4096),
                                   parse_mode=ParseMode.HTML, reply_markup=markup)
             photo = False
         self.db.add_post(msg.chat_id, msg.message_id, "card", d.id, is_photo=photo)
@@ -97,12 +143,18 @@ class ChannelService:
         if not d or not p:
             return False
         markup = markup or kb.card_keyboard(d, self.username)
-        if p.is_photo:
+        banner = self.banner(d) if p.is_photo and not d.poster else None
+        if banner:  # generated banner shows status/episodes, so swap the image too
+            from telegram import InputMediaPhoto
+            await safe_call(self.bot.edit_message_media, chat_id=p.chat_id, message_id=p.message_id,
+                            media=InputMediaPhoto(banner, caption=self.card(d), parse_mode=ParseMode.HTML),
+                            reply_markup=markup)
+        elif p.is_photo:
             await safe_call(self.bot.edit_message_caption, chat_id=p.chat_id, message_id=p.message_id,
-                            caption=drama_card(d), parse_mode=ParseMode.HTML, reply_markup=markup)
+                            caption=self.card(d), parse_mode=ParseMode.HTML, reply_markup=markup)
         else:
             await safe_call(self.bot.edit_message_text, chat_id=p.chat_id, message_id=p.message_id,
-                            text=drama_card(d, 4096), parse_mode=ParseMode.HTML, reply_markup=markup)
+                            text=self.card(d, 4096), parse_mode=ParseMode.HTML, reply_markup=markup)
         return True
 
     async def add_episodes(self, drama_id: int, episodes, start: int | None = None) -> list[int]:

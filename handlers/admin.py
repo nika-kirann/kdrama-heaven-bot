@@ -10,7 +10,7 @@ from utils import URL_RE, describe_links, h, local_midnight_utc, norm_quality, p
 from .common import admin_only, arg_text, deps
 
 log = logging.getLogger(__name__)
-EDIT_FIELDS = {"title", "synopsis", "genres", "year", "poster", "total", "status", "repost", "links", "quality"}
+EDIT_FIELDS = {"title", "synopsis", "genres", "year", "poster", "total", "status", "repost", "links", "quality", "audio", "imdb"}
 
 
 @admin_only
@@ -33,7 +33,7 @@ async def edit(update: Update, context):
     parts = args.split(maxsplit=2)
     if len(parts) < 2 or not parts[0].isdigit() or parts[1].lower() not in EDIT_FIELDS:
         return await update.message.reply_text(
-            "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, total, status, repost, links, quality\n"
+            "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, total, status, audio, imdb, repost, links, quality\n"
             "Examples:\n/edit 3 year 2024\n/edit 3 quality 520p 720p   (rename; use - to delete a quality)\n"
             "/edit 3 links\nEP 5\n1080p: https://x/ep5.mkv\n(replaces those qualities for those episodes)")
     d = db.find_drama(parts[0])
@@ -77,6 +77,16 @@ async def edit(update: Update, context):
             if not URL_RE.match(value):
                 raise ValueError("must be an http(s) image URL")
             changes = await svc.persist_poster(value)
+        elif field == "audio":
+            changes = {"audio": ", ".join(p.strip() for p in value.replace("/", ",").split(",") if p.strip())[:100] or None}
+        elif field == "imdb":
+            if value in {"-", ""}:
+                changes = {"imdb": None}
+            else:
+                v = value.split("/")[0].strip()
+                if not (v.replace(".", "", 1).isdigit() and 0 <= float(v) <= 10):
+                    raise ValueError("must be a rating like 8.2 (or - to clear)")
+                changes = {"imdb": v}
         elif field == "genres":
             changes = {"genres": ", ".join(g.strip().title() for g in value.split(",") if g.strip())}
         else:

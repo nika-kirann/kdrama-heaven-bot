@@ -47,6 +47,15 @@ class Config:
     flush_delay: float = field(default_factory=lambda: float(os.getenv("STORAGE_FLUSH_DELAY", "3")))
     poster_cache_dir: str = field(default_factory=lambda: os.getenv("POSTER_CACHE_DIR", ""))  # e.g. /tmp/posters
     episodes_per_page: int = 10
+    default_audio: str = field(default_factory=lambda: os.getenv("DEFAULT_AUDIO", "Korean, Eng Sub"))
+    brand: str = field(default_factory=lambda: os.getenv("BRAND", "").strip())  # footer handle; default = channel
+    banner: bool = field(default_factory=lambda: os.getenv("GENERATE_BANNER", "1").strip().lower() not in {"0", "false", "no", "off"})
+
+    @property
+    def brand_handle(self) -> str:
+        if self.brand:
+            return self.brand
+        return self.channel_id if isinstance(self.channel_id, str) and self.channel_id.startswith("@") else "@kdrama_heaven"
 
     @property
     def tz(self) -> ZoneInfo:
