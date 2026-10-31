@@ -56,22 +56,13 @@ def render_banner(title: str, status: str = "Ongoing", genres=(), year=None, epi
     d = ImageDraw.Draw(img)
     x0 = 90
     small, mid = _font("DejaVuSans-Bold.ttf", 24), _font("DejaVuSans.ttf", 28)
-    d.text((x0, 80), "K-DRAMA", font=small, fill=ACCENT, spacing=4)
-    title = f"{title} ({year})" if year else title
-    # title: largest size that fits in <= 2 lines (3 for very long titles), measured in pixels;
-    # "(YYYY)" is kept glued to the last word
-    words = title.replace(" (", "\u00a0(").split(" ")
-    for size in (96, 88, 80, 72, 64, 56, 50, 44):
+    d.text((x0, 80), f"K-DRAMA{'  ·  ' + str(year) if year else ''}".upper(), font=small, fill=ACCENT,
+           spacing=4)
+    # title: shrink to fit in at most 3 lines
+    for size in (96, 84, 72, 62, 54, 46):
         f = _font("DejaVuSerif-Bold.ttf", size)
-        lines, cur = [], ""
-        for w in words:
-            t = f"{cur} {w}".strip()
-            if cur and d.textlength(t, font=f) > W - x0 * 2:
-                lines.append(cur); cur = w
-            else:
-                cur = t
-        lines.append(cur)
-        if len(lines) <= (2 if size > 56 else 3):
+        lines = textwrap.wrap(title.upper(), width=max(8, int(1050 / (size * 0.62))))
+        if len(lines) <= 3:
             break
     lines = lines[:3]
     y = 125
