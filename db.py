@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import (Boolean, DateTime, ForeignKey, Integer, String, Text,
-                        create_engine, func, or_, select)
+                        create_engine, event, func, inspect, or_, select, text)
 from sqlalchemy.orm import (DeclarativeBase, Mapped, Session, mapped_column,
                             relationship, selectinload, sessionmaker)
 
@@ -22,6 +22,7 @@ class Drama(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(200))
     poster: Mapped[str | None] = mapped_column(String(500))  # Telegram file_id or URL
+    poster_msg_id: Mapped[int | None] = mapped_column(Integer)  # message in the storage channel
     synopsis: Mapped[str] = mapped_column(Text, default="")
     genres: Mapped[str] = mapped_column(String(300), default="")  # comma separated
     year: Mapped[int | None] = mapped_column(Integer)
@@ -109,9 +110,32 @@ class Request(Base):
 
 class Database:
     def __init__(self, url: str = "sqlite:///kdrama.db"):
+        self.url = url
+        self.on_commit = None  # callback set by the storage layer
         self.engine = create_engine(url, future=True)
-        Base.metadata.create_all(self.engine)
+        self._migrate()
         self.Session = sessionmaker(self.engine, expire_on_commit=False)
+        event.listen(self.Session, "after_commit", self._after_commit)
+
+    @property
+    def path(self) -> str | None:
+        return self.url[len("sqlite:///"):] if self.url.startswith("sqlite:///") else None
+
+    def _after_commit(self, _session):
+        if self.on_commit:
+            self.on_commit()
+
+    def _migrate(self):
+        Base.metadata.create_all(self.engine)
+        cols = {c["name"] for c in inspect(self.engine).get_columns("dramas")}
+        if "poster_msg_id" not in cols:
+            with self.engine.begin() as c:
+                c.execute(text("ALTER TABLE dramas ADD COLUMN poster_msg_id INTEGER"))
+
+    def reload(self):
+        """Re-open the file after it was replaced (e.g. restored from Telegram)."""
+        self.engine.dispose()
+        self._migrate()
 
     def session(self) -> Session:
         return self.Session()

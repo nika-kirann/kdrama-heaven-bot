@@ -150,6 +150,7 @@ async def finish(update, context, eps):
     draft.setdefault("status", "Ongoing")
     if eps and draft.get("total_episodes") and max(eps) > draft["total_episodes"]:
         draft["total_episodes"] = max(eps)
+    draft.update(await svc.persist_poster(draft.get("poster")))
     d = db.add_drama(**draft, episodes=eps)
     try:
         await svc.post_card(d)

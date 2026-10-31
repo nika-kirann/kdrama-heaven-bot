@@ -76,7 +76,7 @@ async def edit(update: Update, context):
         elif field == "poster":
             if not URL_RE.match(value):
                 raise ValueError("must be an http(s) image URL")
-            changes = {"poster": value}
+            changes = await svc.persist_poster(value)
         elif field == "genres":
             changes = {"genres": ", ".join(g.strip().title() for g in value.split(",") if g.strip())}
         else:

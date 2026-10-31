@@ -12,6 +12,7 @@ import jobs
 from config import config
 from db import Database
 from services import ChannelService
+from storage import make_storage
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -30,16 +31,36 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app: Application):
     me = await app.bot.get_me()
-    log.info("Logged in as @%s, channel=%s, admins=%s", me.username, config.channel_id, sorted(config.admin_ids))
+    cfg = app.bot_data["cfg"]
+    log.info("Logged in as @%s, channel=%s, admins=%s", me.username, cfg.channel_id, sorted(cfg.admin_ids))
+    await start_storage(app)
     await app.bot.set_my_commands([BotCommand("start", "Main menu"), BotCommand("browse", "Browse dramas"),
                                    BotCommand("search", "Search by title, genre or year")])
     jobs.setup_jobs(app)
 
 
+async def start_storage(app: Application):
+    """Restore the DB from Telegram (if enabled) before polling starts."""
+    st, db = app.bot_data["storage"], app.bot_data["db"]
+    if st.backend == "telegram":
+        if await st.restore():
+            db.reload()
+        db.on_commit = st.schedule_flush
+        await st.flush()  # make sure a backup exists right away (fresh start)
+        log.info("Storage: telegram (chat %s, backup message %s)", st.chat_id, st.backup_msg_id)
+    else:
+        log.info("Storage: local (%s)", db.path)
+
+
+async def post_stop(app: Application):
+    await app.bot_data["storage"].close()
+
+
 def build_app(cfg=config, db=None) -> Application:
-    app = Application.builder().token(cfg.bot_token).post_init(post_init).build()
+    app = Application.builder().token(cfg.bot_token).post_init(post_init).post_stop(post_stop).build()
     db = db or Database(cfg.database_url)
-    app.bot_data.update(cfg=cfg, db=db, svc=ChannelService(app.bot, db, cfg))
+    storage = make_storage(cfg, app.bot, db.path)
+    app.bot_data.update(cfg=cfg, db=db, storage=storage, svc=ChannelService(app.bot, db, cfg, storage))
     handlers.register(app)
     app.add_error_handler(on_error)
     return app

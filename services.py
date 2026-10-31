@@ -49,8 +49,19 @@ def drama_card(d: Drama, limit: int = CAPTION_LIMIT) -> str:
 
 
 class ChannelService:
-    def __init__(self, bot, db: Database, cfg):
-        self.bot, self.db, self.cfg = bot, db, cfg
+    def __init__(self, bot, db: Database, cfg, storage=None):
+        self.bot, self.db, self.cfg, self.storage = bot, db, cfg, storage
+
+    async def persist_poster(self, poster: str | None) -> dict:
+        """With telegram storage, copy the poster into the storage channel and keep its file_id."""
+        if not poster or not self.storage or self.storage.backend != "telegram":
+            return {"poster": poster}
+        try:
+            fid, mid = await self.storage.store_poster(poster)
+            return {"poster": fid, "poster_msg_id": mid}
+        except TelegramError as e:
+            log.warning("Storing poster in Telegram failed (%s); keeping the original reference", e)
+            return {"poster": poster}
 
     @property
     def username(self):

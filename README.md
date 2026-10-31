@@ -30,7 +30,11 @@ An all-in-one Telegram bot for running the **kdrama_heaven** channel: drama card
 | `DAILY_DIGEST_TIME` | `10:00` | daily "New episodes today" post |
 | `CLEANUP_DAYS` | `7` | age after which service notices are deleted |
 | `CLEANUP_TIME` | `03:30` | daily auto-cleanup time |
-| `DATABASE_URL` | `sqlite:///kdrama.db` | SQLAlchemy URL |
+| `DATABASE_URL` | `sqlite:///kdrama.db` | SQLAlchemy URL (relative paths resolve to the app dir; Docker uses `/tmp/kdrama.db`) |
+| `STORAGE_BACKEND` | `local` | `local` or `telegram` (see Storage backends) |
+| `STORAGE_CHANNEL_ID` | `CHANNEL_ID` | private channel holding the DB backup + posters |
+| `STORAGE_FLUSH_DELAY` | `3` | seconds of quiet before a backup upload |
+| `POSTER_CACHE_DIR` | (off) | optional local poster cache, e.g. `/tmp/posters` |
 
 ## Commands
 **Admins (in a DM with the bot):**
@@ -82,3 +86,49 @@ Add an `EP 9` line to jump to episode 9. Plain URLs with no quality are saved as
 
 ## Tests
 `.venv/bin/pytest -q` runs the whole bot against a fake Telegram HTTP layer (`tests/fakes.py`) with a dummy token. No network access is needed.
+
+## Storage backends
+
+| `STORAGE_BACKEND` | What happens |
+| --- | --- |
+| `local` (default) | Plain SQLite file (`kdrama.db` next to the code). Nothing is uploaded. |
+| `telegram` | Same SQLite file, mirrored to a private **storage channel** (`STORAGE_CHANNEL_ID`, falls back to `CHANNEL_ID`). |
+
+How the Telegram backend works:
+- **Startup**: before polling starts the bot reads the storage channel's **pinned message**; if it is a `kdrama-backup.db` document it downloads it and opens it. No pin = fresh start, and a first backup is uploaded and pinned right away.
+- **Every write**: each DB commit schedules a flush (debounced, `STORAGE_FLUSH_DELAY`, default 3 s; bursts of writes become one upload). The pinned document is replaced in place (`editMessageMedia`); if that fails a new one is sent and pinned and the old one deleted.
+- **Shutdown** (SIGTERM / redeploy): a final flush.
+- **Posters**: when an admin adds a poster (photo or URL) it is re-sent to the storage channel and its Telegram `file_id` + message id are kept in the DB, so it never depends on the local disk. Optional local cache: `POSTER_CACHE_DIR=/tmp/posters`.
+- Limits: Bot API downloads are capped at 20 MB, which is far beyond this DB. Don't unpin or delete the backup message. Run only **one** instance per token.
+
+## Deploy on Koyeb
+
+Koyeb pricing (checked 31 Oct 2026, [koyeb.com/pricing](https://www.koyeb.com/pricing), [instance docs](https://www.koyeb.com/docs/reference/instances)):
+- New accounts have **no free plan** any more (the Starter plan was closed in Feb 2026). The entry plan is **Pro, $29/month, including $10 of compute**.
+- The free instance (for older orgs) **can't run workers and sleeps after 1 h idle**, so it doesn't fit this bot.
+- This bot uses **`eco-nano`** (0.1 vCPU, 256 MB, Singapore): **$1.61/month** always on, covered by the Pro credit. If memory gets tight, use `eco-micro` ($2.68).
+- A **worker** service with min scale 1 runs 24/7: it **never sleeps** (no scale-to-zero, no HTTP needed). If the process crashes Koyeb restarts it, and the DB comes back from Telegram.
+
+Steps:
+1. **Push to GitHub** (private repo): `git push -u origin main`. `.env` and `*.db` are git-ignored.
+2. **Storage channel**: in Telegram create a new *private* channel (e.g. "kdrama storage"), add **@kdrama_help_robot as admin** (post, edit, delete, pin). Get its id (`-100…`): forward a post from it to @userinfobot or @RawDataBot.
+3. **Stop the local bot** before Koyeb starts (only one poller per token): `kill -TERM $(pgrep -f "python main.py")`. To carry the current data over, run the local bot once with `STORAGE_BACKEND=telegram` and `STORAGE_CHANNEL_ID=…` so it uploads the backup, then stop it.
+4. **Koyeb**: sign up, choose a plan, *Settings → Secrets*, create the secrets `BOT_TOKEN`, `CHANNEL_ID` (`@kdrama_heaven`), `STORAGE_CHANNEL_ID` (`-100…`), `ADMIN_IDS`.
+5. **Create the app**: *Create Service → GitHub →* `nika-kirann/kdrama-heaven-bot`, branch `main`, builder **Dockerfile**, service type **Worker**, region **Singapore**, instance **eco-nano**, scaling 1–1. Env vars (secrets are referenced from step 4):
+
+   | Variable | Value |
+   | --- | --- |
+   | `BOT_TOKEN` | secret `BOT_TOKEN` |
+   | `CHANNEL_ID` | secret `CHANNEL_ID` |
+   | `STORAGE_CHANNEL_ID` | secret `STORAGE_CHANNEL_ID` |
+   | `ADMIN_IDS` | secret `ADMIN_IDS` |
+   | `STORAGE_BACKEND` | `telegram` |
+   | `TIMEZONE` | `Asia/Kolkata` |
+   | `DAILY_DIGEST_TIME` | `10:00` |
+   | `CLEANUP_DAYS` | `2` |
+   | `CLEANUP_TIME` | `03:30` |
+
+   CLI alternative: install the Koyeb CLI, run `koyeb login`, create the secrets with `koyeb secret create BOT_TOKEN --value '<token>'` (and the same for the others), then run `./deploy-koyeb.sh`. `koyeb.yaml` lists the same settings for reference.
+6. **Deploy and read the logs**: *Service → Logs* (or `koyeb service logs kdrama-heaven/bot`). You should see `Telegram storage: restored DB…` or `no backup found… starting fresh`, then `Logged in as @kdrama_help_robot` and `Application started`.
+7. **Verify**: send `/start` to the bot, and check that the storage channel has a pinned `kdrama-backup.db`, refreshed a few seconds after each admin change.
+8. **Updates**: `git push` to `main` makes Koyeb rebuild and redeploy automatically. The old instance gets SIGTERM, does a final flush, and the new one restores it.
