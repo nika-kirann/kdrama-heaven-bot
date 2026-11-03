@@ -2,12 +2,12 @@
 import logging
 
 from telegram import Update
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import jobs
 import keyboards as kb
 from utils import URL_RE, describe_links, h, local_midnight_utc, norm_quality, parse_local_dt, parse_quality_links
-from .common import admin_only, arg_text, deps
+from .common import admin_only, is_admin, arg_text, deps
 
 log = logging.getLogger(__name__)
 EDIT_FIELDS = {"title", "synopsis", "genres", "year", "poster", "total", "status", "repost", "links", "quality", "audio", "imdb"}
@@ -29,17 +29,22 @@ async def complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit(update: Update, context):
     db, svc, _ = deps(context)
     args = arg_text(update)
+    msg = update.effective_message
     # format: /edit <id> <field> <value>   (id is required here to avoid ambiguity)
     parts = args.split(maxsplit=2)
     if len(parts) < 2 or not parts[0].isdigit() or parts[1].lower() not in EDIT_FIELDS:
-        return await update.message.reply_text(
+        return await msg.reply_text(
             "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, total, status, audio, imdb, repost, links, quality\n"
-            "Examples:\n/edit 3 year 2024\n/edit 3 quality 520p 720p   (rename; use - to delete a quality)\n"
+            "Examples:\n/edit 3 year 2024\n"
+            "/edit 3 poster: send a photo with that caption, reply to a photo with it, add an https URL, "
+            "or send it alone and then the photo\n/edit 3 quality 520p 720p   (rename; use - to delete a quality)\n"
             "/edit 3 links\nEP 5\n1080p: https://x/ep5.mkv\n(replaces those qualities for those episodes)")
     d = db.find_drama(parts[0])
     if not d:
         return await update.message.reply_text("No drama with that id.")
     field, value = parts[1].lower(), (parts[2] if len(parts) > 2 else "").strip()
+    if field == "poster":
+        return await edit_poster(update, context, d, value)
     if field == "links":
         try:
             eps = parse_quality_links(value, None, start=1)
@@ -73,10 +78,6 @@ async def edit(update: Update, context):
             if value.title() not in {"Ongoing", "Completed"}:
                 raise ValueError("must be Ongoing or Completed")
             changes = {"status": value.title()}
-        elif field == "poster":
-            if not URL_RE.match(value):
-                raise ValueError("must be an http(s) image URL")
-            changes = await svc.persist_poster(value)
         elif field == "audio":
             changes = {"audio": ", ".join(p.strip() for p in value.replace("/", ",").split(",") if p.strip())[:100] or None}
         elif field == "imdb":
@@ -95,17 +96,70 @@ async def edit(update: Update, context):
             changes = {field: value}
     except ValueError as e:
         return await update.message.reply_text(f"⚠️ {field} {e}")
-    poster_kind_changed = field == "poster" and not d.poster
     db.update_drama(d.id, **changes)
-    if poster_kind_changed:
-        # A text post can't become a photo post; delete and repost.
-        p = db.card_post(d.id)
-        if p:
-            await svc._remove(p)
-        await svc.post_card(db.get_drama(d.id))
-    else:
-        await svc.refresh_card(d.id)
+    await svc.refresh_card(d.id)
     await update.message.reply_text(f"✏️ Updated {field} for {d.title}; channel post edited.")
+
+
+async def _photo_ref(context, message):
+    """file_id of a photo (largest size) or an image document (re-uploaded as a photo) in message."""
+    if message is None:
+        return None
+    if message.photo:
+        return message.photo[-1].file_id
+    doc = message.document
+    if doc and (doc.mime_type or "").startswith("image/"):
+        f = await context.bot.get_file(doc.file_id)
+        data = bytes(await f.download_as_bytearray())
+        sent = await context.bot.send_photo(message.chat_id, photo=data, caption="🖼 poster preview",
+                                            disable_notification=True)
+        return sent.photo[-1].file_id
+    return None
+
+
+async def _apply_poster(update, context, d, poster):
+    _, svc, _ = deps(context)
+    await svc.set_poster(d.id, poster)
+    await update.effective_message.reply_text(f"🖼 Poster updated for {d.title}; channel post edited.")
+
+
+async def edit_poster(update, context, d, value):
+    """/edit <id> poster: photo with that caption, a reply to a photo, an https URL, or ask for one."""
+    msg = update.effective_message
+    poster = await _photo_ref(context, msg) or await _photo_ref(context, msg.reply_to_message)
+    if poster:
+        return await _apply_poster(update, context, d, poster)
+    if value:
+        if not URL_RE.match(value):
+            return await msg.reply_text("⚠️ poster must be a photo or an http(s) image URL")
+        return await _apply_poster(update, context, d, value)
+    context.user_data["awaiting_poster"] = d.id
+    await msg.reply_text(f"🖼 Send the new poster photo for {d.title} now (or /cancel).")
+
+
+async def poster_photo(update: Update, context):
+    """A photo/image sent after `/edit <id> poster`, or with that caption."""
+    db, _, _ = deps(context)
+    msg = update.effective_message
+    if (msg.caption or "").startswith("/edit"):
+        context.user_data.pop("awaiting_poster", None)
+        return await edit(update, context)  # admin_only inside; arg_text reads the caption
+    if not is_admin(update, context):
+        return
+    did = context.user_data.pop("awaiting_poster", None)
+    d = db.get_drama(did) if did else None
+    if not d:
+        return
+    poster = await _photo_ref(context, msg)
+    if not poster:
+        context.user_data["awaiting_poster"] = did
+        return await msg.reply_text("That isn't an image. Send a photo, or /cancel.")
+    await _apply_poster(update, context, d, poster)
+
+
+async def cancel_poster(update: Update, context):
+    if context.user_data.pop("awaiting_poster", None):
+        await update.message.reply_text("Cancelled the poster change.")
 
 
 @admin_only
@@ -238,5 +292,6 @@ def handlers():
         CommandHandler("stats", stats), CommandHandler("schedule", schedule),
         CommandHandler("schedules", schedules), CommandHandler("unschedule", unschedule),
         CommandHandler("cleanup", cleanup), CommandHandler("digest", digest_now),
-        CommandHandler("admin", admin_help),
+        CommandHandler("admin", admin_help), CommandHandler("cancel", cancel_poster),
+        MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE), poster_photo),
     ]

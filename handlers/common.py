@@ -34,6 +34,7 @@ def admin_only(fn):
 
 
 def arg_text(update: Update) -> str:
-    text = update.effective_message.text or ""
+    m = update.effective_message
+    text = m.text or m.caption or ""
     parts = text.split(maxsplit=1)
     return parts[1].strip() if len(parts) > 1 else ""

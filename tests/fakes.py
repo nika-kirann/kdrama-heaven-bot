@@ -61,6 +61,8 @@ class FakeRequest(BaseRequest):
         if api == "sendPhoto":
             return self._msg(p, caption=p.get("caption", ""),
                              photo=[{"file_id": "x", "file_unique_id": "y", "width": 1, "height": 1}])
+        if api == "getFile":
+            return {"file_id": p.get("file_id", "f"), "file_unique_id": "fu", "file_path": "documents/f.jpg"}
         if api in {"editMessageCaption", "editMessageText", "editMessageReplyMarkup"}:
             return self._msg(p) | {"message_id": p.get("message_id", 1)}
         return True
@@ -69,7 +71,7 @@ class FakeRequest(BaseRequest):
 _uid = itertools.count(1)
 
 
-def msg_update(text=None, user_id=1, chat_id=None, photo=False):
+def msg_update(text=None, user_id=1, chat_id=None, photo=False, caption=None, reply=None, document=None):
     chat_id = chat_id or user_id
     m = {"message_id": next(_uid), "date": int(time.time()),
          "chat": {"id": chat_id, "type": "private"},
@@ -77,6 +79,14 @@ def msg_update(text=None, user_id=1, chat_id=None, photo=False):
     if photo:
         m["photo"] = [{"file_id": "small", "file_unique_id": "s", "width": 90, "height": 90},
                       {"file_id": "POSTER_FILE_ID", "file_unique_id": "b", "width": 900, "height": 1200}]
+    if photo and photo is not True:
+        m["photo"][-1]["file_id"] = photo
+    if document:
+        m["document"] = {"file_id": document, "file_unique_id": "d", "mime_type": "image/jpeg", "file_name": "p.jpg"}
+    if caption is not None:
+        m["caption"] = caption
+    if reply is not None:
+        m["reply_to_message"] = reply["message"]
     if text is not None:
         m["text"] = text
         if text.startswith("/"):

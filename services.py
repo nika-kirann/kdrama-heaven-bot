@@ -157,6 +157,26 @@ class ChannelService:
                             text=self.card(d, 4096), parse_mode=ParseMode.HTML, reply_markup=markup)
         return True
 
+    async def set_poster(self, drama_id: int, poster: str) -> Drama:
+        """Store a new poster (copied to the storage channel) and show it on the channel card."""
+        changes = await self.persist_poster(poster)
+        self.db.update_drama(drama_id, **changes)
+        d = self.db.get_drama(drama_id)
+        p = self.db.card_post(drama_id)
+        if p and p.is_photo:
+            from telegram import InputMediaPhoto
+            try:
+                await safe_call(self.bot.edit_message_media, chat_id=p.chat_id, message_id=p.message_id,
+                                media=InputMediaPhoto(d.poster, caption=self.card(d), parse_mode=ParseMode.HTML),
+                                reply_markup=kb.card_keyboard(d, self.username))
+                return d
+            except TelegramError as e:
+                log.warning("Editing poster media failed (%s); reposting", e)
+        if p:  # text post (or edit failed): a text post can't become a photo post
+            await self._remove(p)
+        await self.post_card(d)
+        return d
+
     async def add_episodes(self, drama_id: int, episodes, start: int | None = None) -> list[int]:
         """episodes: {ep: [(quality, url, kind)]} or a legacy list of URLs."""
         if isinstance(episodes, list):
