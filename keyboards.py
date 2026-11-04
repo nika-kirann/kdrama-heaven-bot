@@ -7,6 +7,8 @@
   br:<kind>:<page>[:arg]  browse lists (ongoing|completed|latest|genre|search|genres)
   list:<page>             admin /list pagination
   st:<Ongoing|Completed>  wizard status choice
+  fol:<drama_id>[:<1|0>]  follow toggle (or explicit follow/unfollow)
+  my:follows              viewer's follows list
 """
 from math import ceil
 
@@ -21,6 +23,7 @@ def card_keyboard(drama, bot_username: str | None = None) -> M:
     if bot_username:
         rows.append([B("💌 Request drama", url=f"https://t.me/{bot_username}?start=request"),
                      B("🔎 Search", url=f"https://t.me/{bot_username}?start=browse")])
+    rows.append([B("🔔 Follow / Unfollow", callback_data=f"fol:{drama.id}")])
     return M(rows)
 
 
@@ -52,11 +55,25 @@ def episodes_keyboard(drama, page: int = 0, per_page: int = PER_PAGE) -> M:
     return M(rows)
 
 
+def follow_button(drama_id: int, following: bool) -> B:
+    return (B("🔕 Unfollow", callback_data=f"fol:{drama_id}:0") if following
+            else B("🔔 Follow", callback_data=f"fol:{drama_id}:1"))
+
+
+def with_follow(markup: M | None, drama_id: int, following: bool) -> M:
+    """Private views: add (or replace) the per-viewer Follow/Unfollow button."""
+    rows = [[b for b in r if not (b.callback_data or "").startswith("fol:")] for r in (markup.inline_keyboard if markup else [])]
+    rows = [r for r in rows if r]
+    rows.append([follow_button(drama_id, following)])
+    return M(rows)
+
+
 def main_menu() -> M:
     return M([
         [B("🔎 Search", callback_data="br:search:0"), B("🆕 Latest", callback_data="br:latest:0")],
         [B("🔄 Ongoing", callback_data="br:ongoing:0"), B("✅ Completed", callback_data="br:completed:0")],
         [B("🏷 Top genres", callback_data="br:genres:0"), B("🙋 Request drama", callback_data="br:request:0")],
+        [B("🔔 My follows", callback_data="my:follows")],
     ])
 
 

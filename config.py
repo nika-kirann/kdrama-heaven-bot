@@ -51,6 +51,11 @@ class Config:
     brand: str = field(default_factory=lambda: os.getenv("BRAND", "").strip())  # footer handle; default = channel
     banner: bool = field(default_factory=lambda: os.getenv("GENERATE_BANNER", "1").strip().lower() not in {"0", "false", "no", "off"})
 
+    notify_rate: float = field(default_factory=lambda: float(os.getenv("NOTIFY_RATE", "25")))  # follower DMs/sec
+    countdown_time: str = field(default_factory=lambda: os.getenv("COUNTDOWN_TIME", "00:05"))
+    weekly_summary: bool = field(default_factory=lambda: os.getenv("WEEKLY_SUMMARY", "1").strip().lower() not in {"0", "false", "no", "off"})
+    weekly_summary_time: str = field(default_factory=lambda: os.getenv("WEEKLY_SUMMARY_TIME", "10:00"))
+
     @property
     def brand_handle(self) -> str:
         if self.brand:

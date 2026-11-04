@@ -9,7 +9,12 @@ from telegram.error import TelegramError
 
 import keyboards as kb
 from db import Database, Drama, utcnow
-from utils import describe_links, h, local_midnight_utc, safe_call
+import asyncio
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest, Forbidden
+
+from utils import DAYS, countdown_text, describe_links, h, local_midnight_utc, next_air, safe_call
 
 log = logging.getLogger(__name__)
 CAPTION_LIMIT = 1024
@@ -54,8 +59,24 @@ def _clip(text: str, room: int) -> str:
     return cut.rstrip(" ,.;:-") + "…" if cut else ""
 
 
+def next_line(d: Drama, tz=None, now=None) -> str | None:
+    """'Ep 7 · Sat 20:00 (in 2 days)' for ongoing dramas with an air schedule."""
+    if d.status == "Completed" or not getattr(d, "air_days", None) or tz is None:
+        return None
+    ep = max((e.number for e in d.episodes), default=0) + 1
+    if d.total_episodes and ep > d.total_episodes:
+        return None
+    from datetime import datetime as _dt
+    now = now or _dt.now(tz)
+    when = next_air(d.air_days, getattr(d, "air_time", None), tz, now)
+    if not when:
+        return None
+    t = f" {d.air_time}" if getattr(d, "air_time", None) else ""
+    return f"Ep {ep} · {DAYS[when.weekday()]}{t} ({countdown_text(when, now)})"
+
+
 def drama_card(d: Drama, limit: int = CAPTION_LIMIT, brand: str = "@kdrama_heaven",
-               default_audio: str = DEFAULT_AUDIO) -> str:
+               default_audio: str = DEFAULT_AUDIO, tz=None, now=None) -> str:
     """Aesthetic HTML card (fits Telegram's 1024 caption / 4096 text limit)."""
     eps = len(d.episodes)
     total = f"/{d.total_episodes}" if d.total_episodes else ""
@@ -70,6 +91,9 @@ def drama_card(d: Drama, limit: int = CAPTION_LIMIT, brand: str = "@kdrama_heave
         rows.append(("Quality", f"<code>{h(' '.join(q))}</code>"))
     if getattr(d, "imdb", None):
         rows.append(("IMDb", f"⭐ {h(d.imdb)}/10"))
+    nxt = next_line(d, tz, now)
+    if nxt:
+        rows.append(("📅 Next", h(nxt)))
     head = (f"✦ <b>{h(d.title)}</b> ✦\n<i>{h(sub)}</i>\n\n╭{LINE}\n"
             + "".join(f"├ <b>{k}</b> · {v}\n" for k, v in rows) + f"╰{LINE}\n")
     tags = " ".join(_tag(g) for g in d.genre_list)
@@ -109,7 +133,8 @@ class ChannelService:
         return msg
 
     def card(self, d: Drama, limit: int = CAPTION_LIMIT) -> str:
-        return drama_card(d, limit, brand=self.cfg.brand_handle, default_audio=self.cfg.default_audio)
+        return drama_card(d, limit, brand=self.cfg.brand_handle, default_audio=self.cfg.default_audio,
+                          tz=self.cfg.tz, now=getattr(self, "now", None))
 
     def banner(self, d: Drama) -> bytes | None:
         if not getattr(self.cfg, "banner", False):
@@ -187,6 +212,7 @@ class ChannelService:
         d = self.db.get_drama(drama_id)
         await self._send(f"🆕 <b>New episodes</b>: {h(d.title)} — {h(describe_links(episodes))} added! 📺",
                          "service", drama_id)
+        await self.notify_followers(drama_id, f"🆕 {h(describe_links(episodes))} just landed!")
         return nums
 
     async def complete(self, drama_id: int):
@@ -195,6 +221,7 @@ class ChannelService:
         d = self.db.get_drama(drama_id)
         await self._send(f"✅ <b>{h(d.title)}</b> is now COMPLETED! Binge all {len(d.episodes)} episodes.",
                          "service", drama_id)
+        await self.notify_followers(drama_id, f"✅ The series is complete. All {len(d.episodes)} episodes are up, binge time!")
 
     async def delete(self, drama_id: int) -> bool:
         self.db.mark_deleted(drama_id)
@@ -258,3 +285,93 @@ class ChannelService:
                 await safe_call(self.bot.send_message, chat_id=aid, text=text, parse_mode=ParseMode.HTML)
             except TelegramError as e:
                 log.warning("Could not DM admin %s: %s (they must /start the bot first)", aid, e)
+
+    # ---------------- followers ----------------
+    def deep_link(self, payload: str) -> str | None:
+        return f"https://t.me/{self.username}?start={payload}" if self.username else None
+
+    async def notify_followers(self, drama_id: int, headline: str) -> dict:
+        """DM every follower (≈cfg.notify_rate msgs/sec). Blocked users are dropped,
+        users who never started the bot are skipped (they can't be messaged)."""
+        d = self.db.get_drama(drama_id)
+        out = {"sent": 0, "blocked": 0, "skipped": 0}
+        if not d:
+            return out
+        text = (f"🔔 <b>New for you</b> ✦\n\n✦ <b>{h(d.title)}</b> ✦\n{headline}\n\n"
+                f"<i>{len(d.episodes)}{'/' + str(d.total_episodes) if d.total_episodes else ''} episodes · "
+                f"{'COMPLETED ✅' if d.status == 'Completed' else 'ONGOING 🔄'}</i>")
+        link = self.deep_link(f"drama_{d.id}")
+        rows = [[InlineKeyboardButton("▶️ Watch now", url=link)]] if link else []
+        rows.append([InlineKeyboardButton("🔕 Unfollow", callback_data=f"fol:{d.id}:0")])
+        markup = InlineKeyboardMarkup(rows)
+        delay = 1.0 / max(1.0, float(getattr(self.cfg, "notify_rate", 25)))
+        for uid in self.db.followers(drama_id):
+            u = self.db.get_user(uid)
+            if u is not None and (u.blocked or not u.started):
+                out["skipped"] += 1
+                continue
+            try:
+                await safe_call(self.bot.send_message, chat_id=uid, text=text, parse_mode=ParseMode.HTML,
+                                reply_markup=markup, disable_web_page_preview=True)
+                out["sent"] += 1
+            except Forbidden:
+                self.db.mark_blocked(uid)
+                out["blocked"] += 1
+            except BadRequest as e:  # chat not found = never started the bot
+                log.info("Follower %s unreachable: %s", uid, e)
+                out["skipped"] += 1
+            except TelegramError as e:
+                log.warning("Follower DM to %s failed: %s", uid, e)
+            if delay:
+                await asyncio.sleep(delay)
+        log.info("Follower alerts for %s: %s", drama_id, out)
+        return out
+
+    # ---------------- countdown ----------------
+    async def refresh_countdowns(self) -> int:
+        """Re-edit ongoing cards with an air schedule whose countdown line changed."""
+        n = 0
+        if not hasattr(self, "_countdown"):
+            self._countdown = {}
+        for d in self.db.list_dramas(status="Ongoing", limit=100_000)[0]:
+            if not d.air_days:
+                continue
+            line = next_line(d, self.cfg.tz, getattr(self, "now", None))
+            if self._countdown.get(d.id) == line:
+                continue
+            try:
+                if await self.refresh_card(d.id):
+                    n += 1
+                self._countdown[d.id] = line
+            except TelegramError as e:
+                log.warning("Countdown refresh for %s failed: %s", d.id, e)
+        return n
+
+    # ---------------- stats ----------------
+    def stats_text(self) -> str:
+        from datetime import timedelta as _td
+        db, tz = self.db, self.cfg.tz
+        today = local_midnight_utc(tz)
+        week = today - _td(days=6)
+        s = db.stats(today)
+        top7, top_all = db.top_clicked(week), db.top_clicked()
+        q7, qall = db.top_qualities(week), db.top_qualities()
+        fol_total, fol_top = db.follower_counts()
+        users, per = db.user_growth(week, 7)
+        fmt = lambda rows: "\n".join(f"  {i}. {h(t)} · {c}" for i, (t, c) in enumerate(rows, 1)) or "  none yet"
+        lpq = db.links_per_quality()
+        return ("📊 <b>kdrama_heaven stats</b>\n"
+                f"Dramas: {s['dramas']} (🔄 {s['ongoing']} ongoing / ✅ {s['completed']} completed)\n"
+                f"Episodes: {s['episodes']} · Posts today: {s['posts_today']}\n"
+                f"Requests: {s['requests']} · Pending schedules: {s['pending_schedules']}\n"
+                + (f"Links per quality: {', '.join(f'{h(q)} {n}' for q, n in lpq.items())}\n" if lpq else "")
+                + f"\n🔥 <b>Top clicked (7d)</b>\n{fmt(top7)}\n🏆 <b>Top clicked (all-time)</b>\n{fmt(top_all)}\n"
+                f"🎞 <b>Most-used quality</b>: "
+                f"{h(q7[0][0]) + f' ({q7[0][1]} in 7d)' if q7 else '-'}"
+                f"{' · all-time ' + h(qall[0][0]) + f' ({qall[0][1]})' if qall else ''}\n"
+                f"\n🔔 <b>Followers</b>: {fol_total} follows\n{fmt(fol_top)}\n"
+                f"\n👥 <b>Users</b>: {users} total, +{sum(per)} in 7d\n"
+                f"  {' '.join(str(x) for x in per)}  (new/day, oldest→today)")
+
+    async def weekly_summary(self):
+        await self.notify_admins("🗓 <b>Weekly summary</b>\n\n" + self.stats_text())

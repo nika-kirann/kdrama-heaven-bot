@@ -4,7 +4,7 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden
 from telegram.constants import ParseMode
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, TypeHandler, filters
 
 import keyboards as kb
 from services import drama_card
@@ -23,6 +23,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if arg == "request":
         context.user_data["awaiting"] = "request"
         return await update.message.reply_text("🙋 Which drama would you like us to add? Send the name.")
+    if arg.startswith("follow_") and arg[7:].isdigit():
+        d = db.get_drama(int(arg[7:]))
+        if d and not d.deleted:
+            db.set_follow(update.effective_user.id, d.id, True)
+            await update.message.reply_text(
+                f"🔔 You're following <b>{h(d.title)}</b>. I'll DM you when new episodes drop!",
+                parse_mode=ParseMode.HTML)
+            return await send_card(update.message, d, context.bot_data.get("svc"))
     did = arg[6:] if arg.startswith("drama_") else arg[1:] if arg.startswith("d") else ""
     if did.isdigit():
         d = db.get_drama(int(did))
@@ -61,6 +69,8 @@ async def dm_card(bot, chat_id, d, markup=None, svc=None):
     """Send a viewer their own private copy of a drama card (with its own keyboard)."""
     card = svc.card if svc else drama_card
     markup = markup or (kb.episodes_keyboard(d, 0) if d.episodes else None)
+    if svc is not None and isinstance(chat_id, int) and chat_id > 0:
+        markup = kb.with_follow(markup, d.id, svc.db.is_following(chat_id, d.id))
     if d.poster:
         return await safe_call(bot.send_photo, chat_id, photo=d.poster, caption=card(d),
                                parse_mode=ParseMode.HTML, reply_markup=markup)
@@ -72,12 +82,15 @@ def deep_link(bot, drama_id) -> str:
     return f"https://t.me/{bot.username}?start=drama_{drama_id}"
 
 
-async def respond(q, context, d, markup, note=None):
+async def respond(q, context, d, markup, note=None, follow=True):
     """Private chats: edit this viewer's own message in place.
     Channel/group posts: NEVER touch the shared keyboard. DM the viewer a private copy instead,
     or, if the bot can't DM them yet, answer with a deep link that opens the bot."""
     if q.message and q.message.chat.type == "private":
         await q.answer(note)
+        db = context.bot_data["db"]
+        if follow:
+            markup = kb.with_follow(markup, d.id, db.is_following(q.from_user.id, d.id))
         return await safe_call(q.edit_message_reply_markup, reply_markup=markup)
     try:
         await dm_card(context.bot, q.from_user.id, d, markup, svc=context.bot_data.get("svc"))
@@ -155,10 +168,15 @@ async def on_quality(update: Update, context):
         msg = f"EP {parts[2]}: pick a quality"
     else:
         markup = kb.links_keyboard(d, int(parts[2]), int(parts[3]), int(parts[4]))
+        if markup:
+            ep = kb._episode(d, int(parts[2]))
+            groups = ep.quality_groups() if ep else []
+            if int(parts[3]) < len(groups):
+                db.add_click(d.id, int(parts[2]), groups[int(parts[3])][0], q.from_user.id)
         msg = f"EP {parts[2]}: open each part/mirror"
     if not markup:
         return await q.answer("That episode isn't available anymore.", show_alert=True)
-    await respond(q, context, d, markup, msg)
+    await respond(q, context, d, markup, msg, follow=False)
 
 
 async def on_back(update: Update, context):
@@ -169,8 +187,61 @@ async def on_back(update: Update, context):
         return await q.answer()
     if q.message and q.message.chat.type == "private":
         await q.answer()
-        return await safe_call(q.edit_message_reply_markup, reply_markup=kb.card_keyboard(d, svc.username))
+        markup = kb.with_follow(kb.card_keyboard(d, svc.username), d.id, db.is_following(q.from_user.id, d.id))
+        return await safe_call(q.edit_message_reply_markup, reply_markup=markup)
     await respond(q, context, d, kb.episodes_keyboard(d, 0) if d.episodes else None)
+
+
+async def track_user(update: Update, context):
+    """Runs first for every update: remember users (new-users stats; who can be DMed)."""
+    u = update.effective_user
+    if not u or u.is_bot:
+        return
+    chat = update.effective_chat
+    db = context.bot_data["db"]
+    try:
+        db.touch_user(u.id, u.username, started=bool(chat and chat.type == "private"))
+    except Exception:
+        log.warning("touch_user failed", exc_info=True)
+
+
+async def on_follow(update: Update, context):
+    db, svc, _ = deps(context)
+    q = update.callback_query
+    parts = q.data.split(":")
+    d = db.get_drama(int(parts[1]))
+    if not d or d.deleted:
+        return await q.answer("That drama is no longer available.", show_alert=True)
+    uid = q.from_user.id
+    want = (parts[2] == "1") if len(parts) > 2 else not db.is_following(uid, d.id)
+    private = q.message and q.message.chat.type == "private"
+    user = db.get_user(uid)
+    if want and not private and not (user and user.started and not user.blocked):
+        # The bot can't DM someone who never started it: send them through a deep link.
+        try:
+            return await q.answer(url=f"https://t.me/{context.bot.username}?start=follow_{d.id}")
+        except BadRequest:
+            return await q.answer(f"💜 Start @{context.bot.username} first, then tap Follow again.", show_alert=True)
+    db.set_follow(uid, d.id, want)
+    note = (f"🔔 Following {d.title}! You'll get a DM for new episodes." if want
+            else f"🔕 Unfollowed {d.title}.")
+    if private and q.message.reply_markup:
+        await q.answer(note)
+        return await safe_call(q.edit_message_reply_markup,
+                               reply_markup=kb.with_follow(q.message.reply_markup, d.id, want))
+    await q.answer(note, show_alert=not private)
+
+
+async def on_my_follows(update: Update, context):
+    db, _, _ = deps(context)
+    q = update.callback_query
+    await q.answer()
+    ds = db.follows_of(q.from_user.id)
+    rows = [[InlineKeyboardButton(f"🔔 {d.title}", callback_data=f"dr:{d.id}")] for d in ds[:50]]
+    rows.append([InlineKeyboardButton("↩️ Menu", callback_data="br:menu:0")])
+    text = (f"🔔 <b>My follows</b> ({len(ds)})\nTap one to open it." if ds
+            else "🔔 You aren't following anything yet. Open a drama and tap 🔔 Follow.")
+    await safe_call(q.edit_message_text, text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def on_noop(update: Update, context):
@@ -199,4 +270,6 @@ def handlers():
         CallbackQueryHandler(on_episodes, pattern=r"^eps:\d+:\d+$"), CallbackQueryHandler(on_back, pattern=r"^back:\d+$"),
         CallbackQueryHandler(on_quality, pattern=r"^(ep:\d+:\d+:\d+|ql:\d+:\d+:\d+:\d+)$"),
         CallbackQueryHandler(on_noop, pattern=r"^noop$"), MessageHandler(private_text, on_text),
+        CallbackQueryHandler(on_follow, pattern=r"^fol:\d+(:[01])?$"),
+        CallbackQueryHandler(on_my_follows, pattern=r"^my:follows$"),
     ]

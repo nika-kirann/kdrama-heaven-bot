@@ -6,11 +6,11 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Mes
 
 import jobs
 import keyboards as kb
-from utils import URL_RE, describe_links, h, local_midnight_utc, norm_quality, parse_local_dt, parse_quality_links
+from utils import parse_airdays, URL_RE, describe_links, h, local_midnight_utc, norm_quality, parse_local_dt, parse_quality_links
 from .common import admin_only, is_admin, arg_text, deps
 
 log = logging.getLogger(__name__)
-EDIT_FIELDS = {"title", "synopsis", "genres", "year", "poster", "total", "status", "repost", "links", "quality", "audio", "imdb"}
+EDIT_FIELDS = {"title", "synopsis", "genres", "year", "poster", "total", "status", "repost", "links", "quality", "audio", "imdb", "airdays"}
 
 
 @admin_only
@@ -34,7 +34,8 @@ async def edit(update: Update, context):
     parts = args.split(maxsplit=2)
     if len(parts) < 2 or not parts[0].isdigit() or parts[1].lower() not in EDIT_FIELDS:
         return await msg.reply_text(
-            "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, total, status, audio, imdb, repost, links, quality\n"
+            "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, total, status, audio, imdb, airdays, repost, links, quality\n"
+            "/edit 3 airdays Sat,Sun 20:00   (IST; - to clear)\n"
             "Examples:\n/edit 3 year 2024\n"
             "/edit 3 poster: send a photo with that caption, reply to a photo with it, add an https URL, "
             "or send it alone and then the photo\n/edit 3 quality 520p 720p   (rename; use - to delete a quality)\n"
@@ -78,6 +79,14 @@ async def edit(update: Update, context):
             if value.title() not in {"Ongoing", "Completed"}:
                 raise ValueError("must be Ongoing or Completed")
             changes = {"status": value.title()}
+        elif field == "airdays":
+            if value in {"-", ""}:
+                if value == "":
+                    raise ValueError("needs days, e.g. Sat,Sun 20:00 (or - to clear)")
+                changes = {"air_days": None, "air_time": None}
+            else:
+                days, tm = parse_airdays(value)
+                changes = {"air_days": days, "air_time": tm}
         elif field == "audio":
             changes = {"audio": ", ".join(p.strip() for p in value.replace("/", ",").split(",") if p.strip())[:100] or None}
         elif field == "imdb":
@@ -198,15 +207,8 @@ async def list_page(update: Update, context):
 
 @admin_only
 async def stats(update: Update, context):
-    db, _, cfg = deps(context)
-    s = db.stats(local_midnight_utc(cfg.tz))
-    await update.message.reply_text(
-        "📊 <b>kdrama_heaven stats</b>\n"
-        f"Dramas: {s['dramas']} (🔄 {s['ongoing']} ongoing / ✅ {s['completed']} completed)\n"
-        f"Episodes: {s['episodes']}\nPosts today: {s['posts_today']}\n"
-        f"Requests: {s['requests']}\nPending schedules: {s['pending_schedules']}"
-        + ("\nLinks per quality: " + ", ".join(f"{h(q)} {n}" for q, n in db.links_per_quality().items())
-           if db.links_per_quality() else ""), parse_mode="HTML")
+    _, svc, _ = deps(context)
+    await update.message.reply_text(svc.stats_text(), parse_mode="HTML")
 
 
 @admin_only

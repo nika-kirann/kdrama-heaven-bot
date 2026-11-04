@@ -20,6 +20,14 @@ async def _digest_job(context: ContextTypes.DEFAULT_TYPE):
     await context.bot_data["svc"].daily_digest()
 
 
+async def _countdown_job(context: ContextTypes.DEFAULT_TYPE):
+    await context.bot_data["svc"].refresh_countdowns()
+
+
+async def _weekly_job(context: ContextTypes.DEFAULT_TYPE):
+    await context.bot_data["svc"].weekly_summary()
+
+
 async def _cleanup_job(context: ContextTypes.DEFAULT_TYPE):
     await context.bot_data["svc"].cleanup()
 
@@ -39,6 +47,12 @@ def setup_jobs(app: Application) -> None:
     jq.run_daily(_digest_job, time=time(hh, mm, tzinfo=cfg.tz), name="daily_digest")
     ch, cm = parse_hhmm(cfg.cleanup_time)
     jq.run_daily(_cleanup_job, time=time(ch, cm, tzinfo=cfg.tz), name="daily_cleanup")
+    th, tm = parse_hhmm(cfg.countdown_time)
+    jq.run_daily(_countdown_job, time=time(th, tm, tzinfo=cfg.tz), name="daily_countdown")
+    jq.run_once(_countdown_job, when=30, name="startup_countdown")
+    if cfg.weekly_summary:
+        wh, wm = parse_hhmm(cfg.weekly_summary_time)
+        jq.run_daily(_weekly_job, time=time(wh, wm, tzinfo=cfg.tz), days=(0,), name="weekly_summary")  # Monday
     pending = db.pending_schedules()
     for sc in pending:
         queue_schedule(jq, sc)

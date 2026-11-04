@@ -177,3 +177,55 @@ def describe_links(eps: dict) -> str:
     nums = sorted(eps)
     rng = f"EP {nums[0]}" if len(nums) == 1 else f"EP {nums[0]}–{nums[-1]}"
     return f"{rng} ({', '.join(quals)})"
+
+
+DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def parse_airdays(text: str) -> tuple[str, str | None]:
+    """'Sat,Sun 20:00' -> ("5,6", "20:00"). Raises ValueError."""
+    import re as _re
+    text = (text or "").strip()
+    m = _re.search(r"(\d{1,2}):(\d{2})\s*$", text)
+    tm = None
+    if m:
+        hh, mm = int(m.group(1)), int(m.group(2))
+        if hh > 23 or mm > 59:
+            raise ValueError("time must be HH:MM")
+        tm, text = f"{hh:02d}:{mm:02d}", text[:m.start()]
+    days = []
+    for part in _re.split(r"[,\s/&]+", text.strip()):
+        if not part:
+            continue
+        key = part[:3].title()
+        if key not in DAYS:
+            raise ValueError(f"unknown day '{part}' (use Mon,Tue,Wed,Thu,Fri,Sat,Sun)")
+        if DAYS.index(key) not in days:
+            days.append(DAYS.index(key))
+    if not days:
+        raise ValueError("give at least one day, e.g. Sat,Sun 20:00")
+    return ",".join(str(d) for d in sorted(days)), tm
+
+
+def next_air(air_days: str | None, air_time: str | None, tz, now=None):
+    """Next local air datetime (aware) or None. now: aware datetime (default: now)."""
+    from datetime import datetime as _dt, timedelta as _td
+    if not air_days:
+        return None
+    days = {int(x) for x in air_days.split(",") if x.strip().isdigit()}
+    if not days:
+        return None
+    now = (now or _dt.now(tz)).astimezone(tz)
+    hh, mm = (int(x) for x in (air_time or "00:00").split(":"))
+    for i in range(8):
+        day = now + _td(days=i)
+        cand = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if cand.weekday() in days and (i > 0 or not air_time or cand >= now):
+            return cand
+    return None
+
+
+def countdown_text(when, now) -> str:
+    n = (when.date() - now.astimezone(when.tzinfo).date()).days
+    rel = "today" if n == 0 else "tomorrow" if n == 1 else f"in {n} days"
+    return rel

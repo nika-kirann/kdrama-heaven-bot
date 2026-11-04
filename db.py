@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import (Boolean, DateTime, ForeignKey, Integer, String, Text,
+from sqlalchemy import (UniqueConstraint, Boolean, DateTime, ForeignKey, Integer, String, Text,
                         create_engine, event, func, inspect, or_, select, text)
 from sqlalchemy.orm import (DeclarativeBase, Mapped, Session, mapped_column,
                             relationship, selectinload, sessionmaker)
@@ -30,6 +30,8 @@ class Drama(Base):
     total_episodes: Mapped[int | None] = mapped_column(Integer)
     audio: Mapped[str | None] = mapped_column(String(100))  # e.g. "Korean, Eng Sub"; None = default
     imdb: Mapped[str | None] = mapped_column(String(10))    # e.g. "8.2"
+    air_days: Mapped[str | None] = mapped_column(String(20))  # weekday numbers Mon=0, e.g. "5,6"
+    air_time: Mapped[str | None] = mapped_column(String(5))   # "HH:MM" local (IST)
     deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -110,6 +112,36 @@ class Request(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class User(Base):
+    """Anyone who talked to the bot. started = the bot may DM them; blocked = they blocked the bot."""
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    username: Mapped[str | None] = mapped_column(String(100))
+    started: Mapped[bool] = mapped_column(Boolean, default=False)
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Follow(Base):
+    __tablename__ = "follows"
+    __table_args__ = (UniqueConstraint("user_id", "drama_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    drama_id: Mapped[int] = mapped_column(ForeignKey("dramas.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Click(Base):
+    """A viewer opened a quality's links (ql: callback)."""
+    __tablename__ = "clicks"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    drama_id: Mapped[int] = mapped_column(Integer, index=True)
+    episode: Mapped[int] = mapped_column(Integer)
+    quality: Mapped[str] = mapped_column(String(20))
+    user_id: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
 class Database:
     def __init__(self, url: str = "sqlite:///kdrama.db"):
         self.url = url
@@ -133,7 +165,8 @@ class Database:
         if "poster_msg_id" not in cols:
             with self.engine.begin() as c:
                 c.execute(text("ALTER TABLE dramas ADD COLUMN poster_msg_id INTEGER"))
-        for col, typ in (("audio", "VARCHAR(100)"), ("imdb", "VARCHAR(10)")):
+        for col, typ in (("audio", "VARCHAR(100)"), ("imdb", "VARCHAR(10)"),
+                         ("air_days", "VARCHAR(20)"), ("air_time", "VARCHAR(5)")):
             if col not in cols:
                 with self.engine.begin() as c:
                     c.execute(text(f"ALTER TABLE dramas ADD COLUMN {col} {typ}"))
@@ -363,3 +396,97 @@ class Database:
             s.add(r)
             s.commit()
             return r
+
+    # ---- users / follows / clicks ------------------------------------
+    def touch_user(self, user_id: int, username: str | None = None, started: bool = False) -> bool:
+        """Record a user; returns True if new. started=True when they messaged the bot in private."""
+        with self.session() as s:
+            u = s.get(User, user_id)
+            new = u is None
+            if new:
+                u = User(id=user_id, username=username, started=started)
+                s.add(u)
+            elif (started and (not u.started or u.blocked)) or (username and u.username != username):
+                u.started = u.started or started
+                u.blocked = False if started else u.blocked
+                u.username = username or u.username
+            else:
+                return False
+            s.commit()
+            return new
+
+    def get_user(self, user_id: int) -> User | None:
+        with self.session() as s:
+            return s.get(User, user_id)
+
+    def mark_blocked(self, user_id: int) -> None:
+        with self.session() as s:
+            u = s.get(User, user_id) or User(id=user_id)
+            u.blocked, u.started = True, False
+            s.merge(u)
+            s.execute(Follow.__table__.delete().where(Follow.user_id == user_id))
+            s.commit()
+
+    def is_following(self, user_id: int, drama_id: int) -> bool:
+        with self.session() as s:
+            return s.scalar(select(func.count(Follow.id)).where(Follow.user_id == user_id,
+                                                                 Follow.drama_id == drama_id)) > 0
+
+    def set_follow(self, user_id: int, drama_id: int, on: bool) -> bool:
+        with self.session() as s:
+            f = s.scalars(select(Follow).where(Follow.user_id == user_id, Follow.drama_id == drama_id)).first()
+            if on and not f:
+                s.add(Follow(user_id=user_id, drama_id=drama_id))
+            elif not on and f:
+                s.delete(f)
+            else:
+                return on
+            s.commit()
+            return on
+
+    def followers(self, drama_id: int) -> list[int]:
+        with self.session() as s:
+            return list(s.scalars(select(Follow.user_id).where(Follow.drama_id == drama_id).order_by(Follow.id)))
+
+    def follows_of(self, user_id: int) -> list[Drama]:
+        with self.session() as s:
+            q = (select(Drama).join(Follow, Follow.drama_id == Drama.id)
+                 .where(Follow.user_id == user_id, Drama.deleted.is_(False)).order_by(Drama.title))
+            return list(s.scalars(q))
+
+    def follower_counts(self, n: int = 5) -> tuple[int, list[tuple[str, int]]]:
+        with self.session() as s:
+            total = s.scalar(select(func.count(Follow.id)))
+            rows = s.execute(select(Drama.title, func.count(Follow.id).label("c")).join(Follow, Follow.drama_id == Drama.id)
+                             .where(Drama.deleted.is_(False)).group_by(Drama.id).order_by(text("c DESC")).limit(n)).all()
+            return total, [(t, c) for t, c in rows]
+
+    def add_click(self, drama_id: int, episode: int, quality: str, user_id: int | None = None) -> None:
+        with self.session() as s:
+            s.add(Click(drama_id=drama_id, episode=episode, quality=quality, user_id=user_id))
+            s.commit()
+
+    def top_clicked(self, since: datetime | None = None, n: int = 5) -> list[tuple[str, int]]:
+        with self.session() as s:
+            q = select(Drama.title, func.count(Click.id).label("c")).join(Drama, Drama.id == Click.drama_id)
+            if since:
+                q = q.where(Click.created_at >= since)
+            return [(t, c) for t, c in s.execute(q.group_by(Drama.id).order_by(text("c DESC")).limit(n)).all()]
+
+    def top_qualities(self, since: datetime | None = None, n: int = 3) -> list[tuple[str, int]]:
+        with self.session() as s:
+            q = select(Click.quality, func.count(Click.id).label("c"))
+            if since:
+                q = q.where(Click.created_at >= since)
+            return [(k, c) for k, c in s.execute(q.group_by(Click.quality).order_by(text("c DESC")).limit(n)).all()]
+
+    def user_growth(self, start: datetime, days: int = 7) -> tuple[int, list[int]]:
+        """(total users, new users per day for `days` days starting at UTC `start`)."""
+        from datetime import timedelta
+        with self.session() as s:
+            total = s.scalar(select(func.count(User.id)))
+            per = []
+            for i in range(days):
+                a, b = start + timedelta(days=i), start + timedelta(days=i + 1)
+                per.append(s.scalar(select(func.count(User.id)).where(User.created_at >= a, User.created_at < b)))
+            return total, per
