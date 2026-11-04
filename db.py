@@ -32,6 +32,7 @@ class Drama(Base):
     imdb: Mapped[str | None] = mapped_column(String(10))    # e.g. "8.2"
     air_days: Mapped[str | None] = mapped_column(String(20))  # weekday numbers Mon=0, e.g. "5,6"
     air_time: Mapped[str | None] = mapped_column(String(5))   # "HH:MM" local (IST)
+    next_ep_date: Mapped[str | None] = mapped_column(String(10))  # "YYYY-MM-DD" override; cleared on /addep
     deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -142,6 +143,21 @@ class Click(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
+class Report(Base):
+    """A viewer's problem report (missing / misaligned episode, broken link...)."""
+    __tablename__ = "reports"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    drama_id: Mapped[int] = mapped_column(Integer, index=True)
+    episode: Mapped[int | None] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(String(20))
+    note: Mapped[str | None] = mapped_column(Text)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    username: Mapped[str | None] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(20), default="open")  # open|fixed|dismissed
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
 class Database:
     def __init__(self, url: str = "sqlite:///kdrama.db"):
         self.url = url
@@ -166,7 +182,7 @@ class Database:
             with self.engine.begin() as c:
                 c.execute(text("ALTER TABLE dramas ADD COLUMN poster_msg_id INTEGER"))
         for col, typ in (("audio", "VARCHAR(100)"), ("imdb", "VARCHAR(10)"),
-                         ("air_days", "VARCHAR(20)"), ("air_time", "VARCHAR(5)")):
+                         ("air_days", "VARCHAR(20)"), ("air_time", "VARCHAR(5)"), ("next_ep_date", "VARCHAR(10)")):
             if col not in cols:
                 with self.engine.begin() as c:
                     c.execute(text(f"ALTER TABLE dramas ADD COLUMN {col} {typ}"))
@@ -490,3 +506,36 @@ class Database:
                 a, b = start + timedelta(days=i), start + timedelta(days=i + 1)
                 per.append(s.scalar(select(func.count(User.id)).where(User.created_at >= a, User.created_at < b)))
             return total, per
+
+    # ---- reports -------------------------------------------------------
+    def last_report_at(self, user_id: int, drama_id: int) -> datetime | None:
+        with self.session() as s:
+            return s.scalar(select(func.max(Report.created_at)).where(Report.user_id == user_id,
+                                                                      Report.drama_id == drama_id))
+
+    def add_report(self, drama_id: int, user_id: int, username: str | None, reason: str,
+                   episode: int | None = None, note: str | None = None) -> Report:
+        with self.session() as s:
+            r = Report(drama_id=drama_id, user_id=user_id, username=username, reason=reason,
+                       episode=episode, note=note)
+            s.add(r)
+            s.commit()
+            return r
+
+    def get_report(self, rid: int) -> Report | None:
+        with self.session() as s:
+            return s.get(Report, rid)
+
+    def set_report_status(self, rid: int, status: str) -> Report | None:
+        with self.session() as s:
+            r = s.get(Report, rid)
+            if r:
+                r.status, r.resolved_at = status, utcnow()
+                s.commit()
+            return r
+
+    def open_reports(self, limit: int = 30) -> tuple[int, list[Report]]:
+        with self.session() as s:
+            n = s.scalar(select(func.count(Report.id)).where(Report.status == "open"))
+            rows = list(s.scalars(select(Report).where(Report.status == "open").order_by(Report.id).limit(limit)))
+            return n, rows

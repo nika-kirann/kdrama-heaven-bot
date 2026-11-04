@@ -31,6 +31,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔔 You're following <b>{h(d.title)}</b>. I'll DM you when new episodes drop!",
                 parse_mode=ParseMode.HTML)
             return await send_card(update.message, d, context.bot_data.get("svc"))
+    if arg.startswith("report_") and arg[7:].isdigit():
+        d = db.get_drama(int(arg[7:]))
+        if d and not d.deleted:
+            from . import report
+            return await report.begin(update.message.reply_text, context, update.effective_user.id, d)
     did = arg[6:] if arg.startswith("drama_") else arg[1:] if arg.startswith("d") else ""
     if did.isdigit():
         d = db.get_drama(int(did))
@@ -252,6 +257,9 @@ async def on_text(update: Update, context):
     db, svc, _ = deps(context)
     awaiting = context.user_data.pop("awaiting", None)
     text = update.message.text.strip()
+    if awaiting in ("report_ep", "report_note"):
+        from . import report
+        return await report.on_text(update, context, awaiting)
     if awaiting == "request":
         u = update.effective_user
         r = db.add_request(u.id, u.username, text[:500])

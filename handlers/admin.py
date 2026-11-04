@@ -6,11 +6,11 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Mes
 
 import jobs
 import keyboards as kb
-from utils import parse_airdays, URL_RE, describe_links, h, local_midnight_utc, norm_quality, parse_local_dt, parse_quality_links
+from utils import URL_RE, describe_links, h, local_midnight_utc, norm_quality, parse_local_dt, parse_quality_links
 from .common import admin_only, is_admin, arg_text, deps
 
 log = logging.getLogger(__name__)
-EDIT_FIELDS = {"title", "synopsis", "genres", "year", "poster", "total", "status", "repost", "links", "quality", "audio", "imdb", "airdays"}
+EDIT_FIELDS = {"title", "synopsis", "genres", "year", "poster", "total", "status", "repost", "links", "quality", "audio", "imdb", "nextep"}
 
 
 @admin_only
@@ -34,8 +34,8 @@ async def edit(update: Update, context):
     parts = args.split(maxsplit=2)
     if len(parts) < 2 or not parts[0].isdigit() or parts[1].lower() not in EDIT_FIELDS:
         return await msg.reply_text(
-            "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, total, status, audio, imdb, airdays, repost, links, quality\n"
-            "/edit 3 airdays Sat,Sun 20:00   (IST; - to clear)\n"
+            "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, total, status, audio, imdb, nextep, repost, links, quality\n"
+            "/edit 3 nextep 2026-11-11 [20:00]   (next-episode date, optional IST time; cleared on /addep; - to clear)\n"
             "Examples:\n/edit 3 year 2024\n"
             "/edit 3 poster: send a photo with that caption, reply to a photo with it, add an https URL, "
             "or send it alone and then the photo\n/edit 3 quality 520p 720p   (rename; use - to delete a quality)\n"
@@ -79,14 +79,20 @@ async def edit(update: Update, context):
             if value.title() not in {"Ongoing", "Completed"}:
                 raise ValueError("must be Ongoing or Completed")
             changes = {"status": value.title()}
-        elif field == "airdays":
-            if value in {"-", ""}:
-                if value == "":
-                    raise ValueError("needs days, e.g. Sat,Sun 20:00 (or - to clear)")
-                changes = {"air_days": None, "air_time": None}
+        elif field == "nextep":
+            from datetime import date as _date
+            if value == "-":
+                changes = {"next_ep_date": None, "air_time": None}
             else:
-                days, tm = parse_airdays(value)
-                changes = {"air_days": days, "air_time": tm}
+                import re as _re
+                m = _re.fullmatch(r"(\d{4}-\d{2}-\d{2})(?:\s+([01]?\d|2[0-3]):([0-5]\d))?", value)
+                try:
+                    if not m:
+                        raise ValueError
+                    day = _date.fromisoformat(m.group(1)).isoformat()
+                except ValueError:
+                    raise ValueError("must be a date like 2026-11-11, optionally with a time: 2026-11-11 20:00 (or - to clear)")
+                changes = {"next_ep_date": day, "air_time": f"{int(m.group(2)):02d}:{m.group(3)}" if m.group(2) else None}
         elif field == "audio":
             changes = {"audio": ", ".join(p.strip() for p in value.replace("/", ",").split(",") if p.strip())[:100] or None}
         elif field == "imdb":
@@ -282,7 +288,7 @@ async def admin_help(update: Update, context):
     await update.message.reply_text(
         "🛠 <b>Admin commands</b>\n"
         "/add — new drama wizard\n/addep &lt;drama&gt; — add episodes\n/complete &lt;drama&gt;\n"
-        "/edit &lt;id&gt; &lt;field&gt; &lt;value&gt;\n/delete &lt;drama&gt;\n/list\n/stats\n"
+        "/edit &lt;id&gt; &lt;field&gt; &lt;value&gt;\n/delete &lt;drama&gt;\n/list\n/stats\n/reports — open viewer reports\n"
         "/schedule &lt;drama|-&gt; YYYY-MM-DD HH:MM &lt;text&gt;\n/schedules, /unschedule &lt;id&gt;\n"
         "/cleanup\n/digest — post today's digest now\n/cancel", parse_mode="HTML")
 

@@ -14,7 +14,7 @@ import asyncio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, Forbidden
 
-from utils import DAYS, countdown_text, describe_links, h, local_midnight_utc, next_air, safe_call
+from utils import DAYS, countdown_text, describe_links, h, local_midnight_utc, safe_call
 
 log = logging.getLogger(__name__)
 CAPTION_LIMIT = 1024
@@ -59,20 +59,52 @@ def _clip(text: str, room: int) -> str:
     return cut.rstrip(" ,.;:-") + "…" if cut else ""
 
 
-def next_line(d: Drama, tz=None, now=None) -> str | None:
-    """'Ep 7 · Sat 20:00 (in 2 days)' for ongoing dramas with an air schedule."""
-    if d.status == "Completed" or not getattr(d, "air_days", None) or tz is None:
+def next_air_info(d: Drama, tz=None, now=None):
+    """(episode number, local air datetime, has_time) for an ongoing drama, or None.
+    Only shown when an admin set next_ep_date (today or later) via /edit <id> nextep."""
+    if d.status == "Completed" or tz is None:
         return None
     ep = max((e.number for e in d.episodes), default=0) + 1
     if d.total_episodes and ep > d.total_episodes:
         return None
-    from datetime import datetime as _dt
-    now = now or _dt.now(tz)
-    when = next_air(d.air_days, getattr(d, "air_time", None), tz, now)
-    if not when:
+    from datetime import date as _date, datetime as _dt
+    now = (now or _dt.now(tz)).astimezone(tz)
+    tm = getattr(d, "air_time", None)
+    hh, mm = (int(x) for x in (tm or "00:00").split(":"))
+    nd = getattr(d, "next_ep_date", None)
+    if nd:
+        try:
+            day = _date.fromisoformat(nd)
+        except ValueError:
+            day = None
+        if day and day >= now.date():
+            return ep, _dt(day.year, day.month, day.day, hh, mm, tzinfo=tz), bool(tm)
+    return None
+
+
+def next_line(d: Drama, tz=None, now=None) -> str | None:
+    """Plain one-liner, e.g. 'Ep 7 · Sat 20:00 (in 2 days)'."""
+    info = next_air_info(d, tz, now)
+    if not info:
         return None
-    t = f" {d.air_time}" if getattr(d, "air_time", None) else ""
-    return f"Ep {ep} · {DAYS[when.weekday()]}{t} ({countdown_text(when, now)})"
+    ep, when, has_time = info
+    from datetime import datetime as _dt
+    t = f" {when:%H:%M}" if has_time else ""
+    return f"Ep {ep} · {DAYS[when.weekday()]}{t} ({countdown_text(when, now or _dt.now(tz))})"
+
+
+def next_block(d: Drama, tz=None, now=None) -> str:
+    """Card block styled like a 'NEXT EPISODE' label with a yellow bar."""
+    info = next_air_info(d, tz, now)
+    if not info:
+        return ""
+    ep, when, has_time = info
+    from datetime import datetime as _dt
+    date = f"{when:%B} {when.day}, {when.year}"
+    t = f" · {when:%I:%M %p}".replace(" 0", " ") + " IST" if has_time else ""
+    rel = countdown_text(when, now or _dt.now(tz))
+    return (f"\n🟨 <b>NEXT EPISODE</b>\n┃ <b>{date}</b>{t}\n"
+            f"┃ <i>Ep {ep} · {DAYS[when.weekday()]} · {rel}</i>")
 
 
 def drama_card(d: Drama, limit: int = CAPTION_LIMIT, brand: str = "@kdrama_heaven",
@@ -91,11 +123,10 @@ def drama_card(d: Drama, limit: int = CAPTION_LIMIT, brand: str = "@kdrama_heave
         rows.append(("Quality", f"<code>{h(' '.join(q))}</code>"))
     if getattr(d, "imdb", None):
         rows.append(("IMDb", f"⭐ {h(d.imdb)}/10"))
-    nxt = next_line(d, tz, now)
-    if nxt:
-        rows.append(("📅 Next", h(nxt)))
     head = (f"✦ <b>{h(d.title)}</b> ✦\n<i>{h(sub)}</i>\n\n╭{LINE}\n"
-            + "".join(f"├ <b>{k}</b> · {v}\n" for k, v in rows) + f"╰{LINE}\n")
+            + "".join(f"├ <b>{k}</b> · {v}\n" for k, v in rows) + f"╰{LINE}\n" + next_block(d, tz, now))
+    if head.endswith("</i>") and (d.synopsis or "").strip():
+        head += "\n"  # blank line between the NEXT EPISODE block and the synopsis
     tags = " ".join(_tag(g) for g in d.genre_list)
     tail = (f"\n{h(tags)}" if tags else "") + f"\n\n✦ <b>Powered by</b> {h(brand)}  ·  <code>#{d.id}</code>"
     room = limit - len(head) - len(tail) - len("\n<blockquote expandable></blockquote>") - 2
@@ -208,6 +239,8 @@ class ChannelService:
             first = start or max((e.number for e in self.db.get_drama(drama_id).episodes), default=0) + 1
             episodes = {first + i: [("HD", u, "part")] for i, u in enumerate(episodes)}
         nums = self.db.add_episodes(drama_id, episodes)
+        if self.db.get_drama(drama_id).next_ep_date:  # the date was for this episode: hide the block
+            self.db.update_drama(drama_id, next_ep_date=None, air_time=None)
         await self.refresh_card(drama_id)
         d = self.db.get_drama(drama_id)
         await self._send(f"🆕 <b>New episodes</b>: {h(d.title)} — {h(describe_links(episodes))} added! 📺",
@@ -279,10 +312,11 @@ class ChannelService:
             self.db.set_schedule_status(sid, "failed")
             raise
 
-    async def notify_admins(self, text: str):
+    async def notify_admins(self, text: str, markup=None):
         for aid in self.cfg.admin_ids:
             try:
-                await safe_call(self.bot.send_message, chat_id=aid, text=text, parse_mode=ParseMode.HTML)
+                await safe_call(self.bot.send_message, chat_id=aid, text=text, parse_mode=ParseMode.HTML,
+                                reply_markup=markup)
             except TelegramError as e:
                 log.warning("Could not DM admin %s: %s (they must /start the bot first)", aid, e)
 
@@ -329,12 +363,12 @@ class ChannelService:
 
     # ---------------- countdown ----------------
     async def refresh_countdowns(self) -> int:
-        """Re-edit ongoing cards with an air schedule whose countdown line changed."""
+        """Re-edit ongoing cards with a nextep date whose countdown line changed."""
         n = 0
         if not hasattr(self, "_countdown"):
             self._countdown = {}
         for d in self.db.list_dramas(status="Ongoing", limit=100_000)[0]:
-            if not d.air_days:
+            if not d.next_ep_date:
                 continue
             line = next_line(d, self.cfg.tz, getattr(self, "now", None))
             if self._countdown.get(d.id) == line:
@@ -364,6 +398,7 @@ class ChannelService:
                 f"Dramas: {s['dramas']} (🔄 {s['ongoing']} ongoing / ✅ {s['completed']} completed)\n"
                 f"Episodes: {s['episodes']} · Posts today: {s['posts_today']}\n"
                 f"Requests: {s['requests']} · Pending schedules: {s['pending_schedules']}\n"
+                f"⚠️ Open reports: {db.open_reports(0)[0]}\n"
                 + (f"Links per quality: {', '.join(f'{h(q)} {n}' for q, n in lpq.items())}\n" if lpq else "")
                 + f"\n🔥 <b>Top clicked (7d)</b>\n{fmt(top7)}\n🏆 <b>Top clicked (all-time)</b>\n{fmt(top_all)}\n"
                 f"🎞 <b>Most-used quality</b>: "

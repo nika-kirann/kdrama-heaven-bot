@@ -9,6 +9,9 @@
   st:<Ongoing|Completed>  wizard status choice
   fol:<drama_id>[:<1|0>]  follow toggle (or explicit follow/unfollow)
   my:follows              viewer's follows list
+  rep:<drama_id>          start a report (private)
+  rr:<drama_id>:<m|w|b|o> report reason;  rsk:<ep|note> skip a report step
+  rpf:<report_id> / rpd:<report_id>  admin: mark fixed / dismiss
 """
 from math import ceil
 
@@ -23,7 +26,10 @@ def card_keyboard(drama, bot_username: str | None = None) -> M:
     if bot_username:
         rows.append([B("💌 Request drama", url=f"https://t.me/{bot_username}?start=request"),
                      B("🔎 Search", url=f"https://t.me/{bot_username}?start=browse")])
-    rows.append([B("🔔 Follow / Unfollow", callback_data=f"fol:{drama.id}")])
+    follow = [B("🔔 Follow / Unfollow", callback_data=f"fol:{drama.id}")]
+    if bot_username:
+        follow.append(B("⚠️ Report", url=f"https://t.me/{bot_username}?start=report_{drama.id}"))
+    rows.append(follow)
     return M(rows)
 
 
@@ -62,10 +68,29 @@ def follow_button(drama_id: int, following: bool) -> B:
 
 def with_follow(markup: M | None, drama_id: int, following: bool) -> M:
     """Private views: add (or replace) the per-viewer Follow/Unfollow button."""
-    rows = [[b for b in r if not (b.callback_data or "").startswith("fol:")] for r in (markup.inline_keyboard if markup else [])]
+    def keep(b):
+        return not ((b.callback_data or "").startswith(("fol:", "rep:")) or "start=report_" in (b.url or ""))
+    rows = [[b for b in r if keep(b)] for r in (markup.inline_keyboard if markup else [])]
     rows = [r for r in rows if r]
+    rows.append([B("⚠️ Report", callback_data=f"rep:{drama_id}")])
     rows.append([follow_button(drama_id, following)])
     return M(rows)
+
+
+REPORT_REASONS = {"m": "Episode missing", "w": "Wrong or misaligned episode", "b": "Broken link", "o": "Other"}
+
+
+def report_reasons(drama_id: int) -> M:
+    return M([[B(f"{'🚫🔀🔗💬'[i]} {t}", callback_data=f"rr:{drama_id}:{k}")]
+              for i, (k, t) in enumerate(REPORT_REASONS.items())])
+
+
+def skip(step: str) -> M:
+    return M([[B("⏭ Skip", callback_data=f"rsk:{step}")]])
+
+
+def report_admin(rid: int) -> M:
+    return M([[B("✅ Mark fixed", callback_data=f"rpf:{rid}"), B("🗑 Dismiss", callback_data=f"rpd:{rid}")]])
 
 
 def main_menu() -> M:

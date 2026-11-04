@@ -10,7 +10,6 @@ from tests.conftest import ADMIN, CHANNEL, VIEWER
 from tests.fakes import cb_update, msg_update
 from tests.test_bot import last_text
 from tests.test_quality import _drama_on_channel, flat
-from utils import parse_airdays
 
 pytestmark = pytest.mark.asyncio
 
@@ -102,52 +101,66 @@ async def test_migration_old_db_gets_new_tables_and_columns(tmp_path):
     c.commit(); c.close()
     db = Database(f"sqlite:///{p}")
     d = db.find_drama("Old")
-    assert d.air_days is None
-    db.update_drama(d.id, air_days="5,6", air_time="20:00")
+    assert d.next_ep_date is None
+    db.update_drama(d.id, next_ep_date="2026-11-11", air_time="20:00")
     db.set_follow(9, d.id, True); db.add_click(d.id, 1, "720p"); db.touch_user(9)
     db2 = Database(f"sqlite:///{p}")  # re-open (as after a Telegram restore) is idempotent
     assert db2.followers(d.id) == [9] and db2.get_drama(d.id).air_time == "20:00"
 
 
-# ---------- air days ----------
-async def test_parse_airdays():
-    assert parse_airdays("Sat,Sun") == ("5,6", None)
-    assert parse_airdays("sun sat 20:30") == ("5,6", "20:30")
-    for bad in ("", "Funday", "Sat 25:00"):
-        with pytest.raises(ValueError):
-            parse_airdays(bad)
-
-
+# ---------- next episode (admin-set date only) ----------
 async def test_countdown_line_and_card(env):
     d, _ = await _drama_on_channel(env, 6)
-    env.db.update_drama(d.id, total_episodes=16)
+    env.db.update_drama(d.id, total_episodes=16, air_days="5,6")   # legacy column is ignored
     tz = env.cfg.tz
     thu = datetime(2026, 11, 5, 12, 0, tzinfo=tz)  # Thursday
-    await env.send(msg_update(f"/edit {d.id} airdays Sat,Sun 20:00", ADMIN))
     d = env.db.get_drama(d.id)
-    assert (d.air_days, d.air_time) == ("5,6", "20:00")
-    assert next_line(d, tz, thu) == "Ep 7 · Sat 20:00 (in 2 days)"
-    assert next_line(d, tz, datetime(2026, 11, 7, 21, 0, tzinfo=tz)) == "Ep 7 · Sun 20:00 (tomorrow)"
-    assert next_line(d, tz, datetime(2026, 11, 8, 9, 0, tzinfo=tz)) == "Ep 7 · Sun 20:00 (today)"
-    assert "📅 Next</b> · Ep 7 · Sat 20:00 (in 2 days)" in drama_card(d, tz=tz, now=thu)
-    assert "Next" not in drama_card(env.db.update_drama(d.id, status="Completed"), tz=tz, now=thu)
-    await env.send(msg_update(f"/edit {d.id} airdays Blursday", ADMIN))
-    assert "unknown day" in last_text(env)
+    assert next_line(d, tz, thu) is None and "NEXT EPISODE" not in drama_card(d, tz=tz, now=thu)
+    await env.send(msg_update(f"/edit {d.id} airdays Sat,Sun 20:00", ADMIN))
+    assert "nextep" in last_text(env) and "airdays" not in last_text(env)
+    await env.send(msg_update(f"/edit {d.id} nextep 2026-11-11 20:00", ADMIN))
+    d = env.db.get_drama(d.id)
+    assert (d.next_ep_date, d.air_time) == ("2026-11-11", "20:00")
+    assert next_line(d, tz, thu) == "Ep 7 · Wed 20:00 (in 6 days)"
+    assert ("🟨 <b>NEXT EPISODE</b>\n┃ <b>November 11, 2026</b> · 8:00 PM IST\n┃ <i>Ep 7 · Wed · in 6 days</i>"
+            in drama_card(d, tz=tz, now=thu))
+    assert "today" in drama_card(d, tz=tz, now=datetime(2026, 11, 11, 22, 0, tzinfo=tz))
+    assert "NEXT EPISODE" not in drama_card(d, tz=tz, now=datetime(2026, 11, 12, 9, 0, tzinfo=tz))  # past
+    await env.send(msg_update(f"/edit {d.id} nextep 2026-11-11", ADMIN))   # time optional
+    d = env.db.get_drama(d.id)
+    assert d.air_time is None
+    assert "┃ <b>November 11, 2026</b>\n┃ <i>Ep 7 · Wed · in 6 days</i>" in drama_card(d, tz=tz, now=thu)
+    for bad in ("11/11", "2026-11-11 25:00", "2026-13-01"):
+        await env.send(msg_update(f"/edit {d.id} nextep {bad}", ADMIN))
+        assert "date like 2026-11-11" in last_text(env)
+    await env.send(msg_update(f"/edit {d.id} nextep -", ADMIN))
+    assert env.db.get_drama(d.id).next_ep_date is None
+    await env.send(msg_update(f"/edit {d.id} nextep 2026-11-11 20:00", ADMIN))
+    await env.svc.add_episodes(d.id, {7: [("720p", "https://x/7", "part")]})
+    d = env.db.get_drama(d.id)
+    assert d.next_ep_date is None and d.air_time is None
+    env.db.update_drama(d.id, next_ep_date="2026-11-11")
+    assert "NEXT EPISODE" not in drama_card(env.db.update_drama(d.id, status="Completed"), tz=tz, now=thu)
 
 
 async def test_daily_countdown_refresh_only_when_changed(env):
     d, _ = await _drama_on_channel(env, 2)
     env.db.update_drama(d.id, air_days="5", total_episodes=16)
+    env.svc.now = datetime(2026, 11, 5, 1, 0, tzinfo=env.cfg.tz)
+    assert await env.svc.refresh_countdowns() == 0          # airdays alone no longer does anything
+    env.db.update_drama(d.id, next_ep_date="2026-11-07")
     cap = lambda: (env.req.of("editMessageCaption") + env.req.of("editMessageText"))[-1]
     cap_text = lambda: cap().get("caption") or cap().get("text")
-    tz = env.cfg.tz
-    env.svc.now = datetime(2026, 11, 5, 1, 0, tzinfo=tz)
     assert await env.svc.refresh_countdowns() == 1
     assert "in 2 days" in cap_text()
     assert await env.svc.refresh_countdowns() == 0
     env.svc.now += timedelta(days=1)
     assert await env.svc.refresh_countdowns() == 1
     assert "tomorrow" in cap_text()
+    env.svc.now += timedelta(days=2)                         # date passed -> block removed
+    assert await env.svc.refresh_countdowns() == 1
+    assert "NEXT EPISODE" not in cap_text()
+    assert await env.svc.refresh_countdowns() == 0
     env.db.update_drama(d.id, status="Completed")
     assert await env.svc.refresh_countdowns() == 0
 
