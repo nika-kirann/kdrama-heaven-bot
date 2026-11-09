@@ -70,10 +70,18 @@ async def send_card(message, d, svc=None):
     await dm_card(message.get_bot(), message.chat_id, d, svc=svc)
 
 
+def browse_markup(d):
+    """Private browse entry: season picker for multi-season, else episode list."""
+    if getattr(d, "is_multi", False):
+        return kb.seasons_keyboard(d)
+    eps = kb._eps(d)
+    return kb.episodes_keyboard(d, 0) if eps else None
+
+
 async def dm_card(bot, chat_id, d, markup=None, svc=None):
     """Send a viewer their own private copy of a drama card (with its own keyboard)."""
     card = svc.card if svc else drama_card
-    markup = markup or (kb.episodes_keyboard(d, 0) if d.episodes else None)
+    markup = markup or browse_markup(d)
     if svc is not None and isinstance(chat_id, int) and chat_id > 0:
         markup = kb.with_follow(markup, d.id, svc.db.is_following(chat_id, d.id))
     if d.poster:
@@ -148,17 +156,50 @@ async def on_drama(update: Update, context):
     await send_card(q.message, d, context.bot_data.get("svc"))
 
 
-async def on_episodes(update: Update, context):
-    """Channel taps go to the viewer's DM; DM taps edit that private message."""
+async def on_seasons(update: Update, context):
     db, _, _ = deps(context)
     q = update.callback_query
-    _, did, page = q.data.split(":")
-    d = db.get_drama(int(did))
+    d = db.get_drama(int(q.data.split(":")[1]))
     if not d or d.deleted:
         return await q.answer("This drama was removed.", show_alert=True)
-    if not d.episodes:
+    if not d.is_multi:
+        return await respond(q, context, d, browse_markup(d))
+    await respond(q, context, d, kb.seasons_keyboard(d))
+
+
+async def on_episodes(update: Update, context):
+    """Channel taps go to the viewer's DM; DM taps edit that private message.
+    Formats: eps:<did>:<page>  |  eps:<did>:<season>:<page>"""
+    db, _, _ = deps(context)
+    q = update.callback_query
+    parts = q.data.split(":")
+    d = db.get_drama(int(parts[1]))
+    if not d or d.deleted:
+        return await q.answer("This drama was removed.", show_alert=True)
+    if len(parts) == 4:
+        season, page = int(parts[2]), int(parts[3])
+    else:
+        season, page = None, int(parts[2])
+    if season is not None and not d.season(season):
+        return await q.answer("That season isn't available.", show_alert=True)
+    eps = kb._eps(d, season)
+    if not eps:
         return await q.answer("No episodes yet, stay tuned! 💜", show_alert=True)
-    await respond(q, context, d, kb.episodes_keyboard(d, int(page)))
+    await respond(q, context, d, kb.episodes_keyboard(d, page, season=season))
+
+
+def _parse_ep_ql(parts):
+    """Return (season|None, ep, page[, qidx]). Supports legacy and season-aware forms."""
+    kind = parts[0]
+    if kind == "ep":
+        # ep:did:ep:page  |  ep:did:season:ep:page
+        if len(parts) == 5:
+            return int(parts[2]), int(parts[3]), int(parts[4]), None
+        return None, int(parts[2]), int(parts[3]), None
+    # ql:did:ep:qidx:page  |  ql:did:season:ep:qidx:page
+    if len(parts) == 6:
+        return int(parts[2]), int(parts[3]), int(parts[5]), int(parts[4])
+    return None, int(parts[2]), int(parts[4]), int(parts[3])
 
 
 async def on_quality(update: Update, context):
@@ -168,17 +209,19 @@ async def on_quality(update: Update, context):
     d = db.get_drama(int(parts[1]))
     if not d or d.deleted:
         return await q.answer("This drama was removed.", show_alert=True)
+    season, epn, page, qidx = _parse_ep_ql(parts)
     if parts[0] == "ep":
-        markup = kb.quality_keyboard(d, int(parts[2]), int(parts[3]))
-        msg = f"EP {parts[2]}: pick a quality"
+        markup = kb.quality_keyboard(d, epn, page, season=season)
+        msg = f"{'S' + str(season) + ' ' if season and d.is_multi else ''}EP {epn}: pick a quality"
     else:
-        markup = kb.links_keyboard(d, int(parts[2]), int(parts[3]), int(parts[4]))
+        markup = kb.links_keyboard(d, epn, qidx, page, season=season)
         if markup:
-            ep = kb._episode(d, int(parts[2]))
+            ep = kb._episode(d, epn, season)
             groups = ep.quality_groups() if ep else []
-            if int(parts[3]) < len(groups):
-                db.add_click(d.id, int(parts[2]), groups[int(parts[3])][0], q.from_user.id)
-        msg = f"EP {parts[2]}: open each part/mirror"
+            if qidx < len(groups):
+                db.add_click(d.id, epn, groups[qidx][0], q.from_user.id,
+                             season=season or (d.current.number if d.current else None))
+        msg = f"EP {epn}: open each part/mirror"
     if not markup:
         return await q.answer("That episode isn't available anymore.", show_alert=True)
     await respond(q, context, d, markup, msg, follow=False)
@@ -187,14 +230,19 @@ async def on_quality(update: Update, context):
 async def on_back(update: Update, context):
     db, svc, _ = deps(context)
     q = update.callback_query
-    d = db.get_drama(int(q.data.split(":")[1]))
+    parts = q.data.split(":")
+    d = db.get_drama(int(parts[1]))
     if not d or d.deleted:
         return await q.answer()
+    to_seasons = len(parts) > 2 and parts[2] == "sea" and d.is_multi
     if q.message and q.message.chat.type == "private":
         await q.answer()
-        markup = kb.with_follow(kb.card_keyboard(d, svc.username), d.id, db.is_following(q.from_user.id, d.id))
+        if to_seasons:
+            markup = kb.with_follow(kb.seasons_keyboard(d), d.id, db.is_following(q.from_user.id, d.id))
+        else:
+            markup = kb.with_follow(kb.card_keyboard(d, svc.username), d.id, db.is_following(q.from_user.id, d.id))
         return await safe_call(q.edit_message_reply_markup, reply_markup=markup)
-    await respond(q, context, d, kb.episodes_keyboard(d, 0) if d.episodes else None)
+    await respond(q, context, d, kb.seasons_keyboard(d) if to_seasons else browse_markup(d))
 
 
 async def track_user(update: Update, context):
@@ -275,8 +323,10 @@ def handlers():
     return [
         CommandHandler("start", start), CommandHandler("browse", browse), CommandHandler("search", search_cmd),
         CallbackQueryHandler(on_browse, pattern=r"^br:"), CallbackQueryHandler(on_drama, pattern=r"^dr:\d+$"),
-        CallbackQueryHandler(on_episodes, pattern=r"^eps:\d+:\d+$"), CallbackQueryHandler(on_back, pattern=r"^back:\d+$"),
-        CallbackQueryHandler(on_quality, pattern=r"^(ep:\d+:\d+:\d+|ql:\d+:\d+:\d+:\d+)$"),
+        CallbackQueryHandler(on_seasons, pattern=r"^sea:\d+$"),
+        CallbackQueryHandler(on_episodes, pattern=r"^eps:\d+:\d+(:\d+)?$"),
+        CallbackQueryHandler(on_back, pattern=r"^back:\d+(:sea)?$"),
+        CallbackQueryHandler(on_quality, pattern=r"^(ep:\d+:\d+:\d+(:\d+)?|ql:\d+:\d+:\d+:\d+(:\d+)?)$"),
         CallbackQueryHandler(on_noop, pattern=r"^noop$"), MessageHandler(private_text, on_text),
         CallbackQueryHandler(on_follow, pattern=r"^fol:\d+(:[01])?$"),
         CallbackQueryHandler(on_my_follows, pattern=r"^my:follows$"),

@@ -200,44 +200,65 @@ async def cancel(update, context):
 
 
 # ---------------- /addep ----------------
+def _addep_ref(text: str):
+    """Parse '/addep <drama> [sN]' (+ optional newline links). Returns (ref, season|None, rest)."""
+    head, _, rest = text.partition("\n")
+    bits = head.rsplit(maxsplit=1)
+    season = None
+    if len(bits) == 2 and bits[1].lower().startswith("s") and bits[1][1:].isdigit():
+        return bits[0], int(bits[1][1:]), rest
+    return head.strip(), None, rest
+
+
 @admin_only
 async def addep_start(update: Update, context):
     db, svc, _ = deps(context)
-    text = arg_text(update)
-    ref, _, rest = text.partition("\n")
+    ref, season, rest = _addep_ref(arg_text(update))
     d = db.find_drama(ref)
     if not d:
-        await update.message.reply_text("Usage: /addep <drama title or id>\n(optional: links on the next lines)")
+        await update.message.reply_text(
+            "Usage: /addep <drama title or id> [sN]\n(optional: links on the next lines)")
+        return ConversationHandler.END
+    if season is not None and not d.season(season):
+        await update.message.reply_text(f"{d.title} has no Season {season}. Use /newseason first.")
         return ConversationHandler.END
     if rest.strip():
-        return await _do_addep(update, context, d.id, rest)
-    context.user_data["addep"] = d.id
-    last = max((e.number for e in d.episodes), default=0)
+        return await _do_addep(update, context, d.id, rest, season)
+    sea = d.season(season) if season else d.current
+    last = max((e.number for e in (sea.episodes if sea else [])), default=0)
+    label = f" S{sea.number}" if d.is_multi and sea else ""
+    context.user_data["addep"] = {"id": d.id, "season": season or (sea.number if sea else 1)}
     await update.message.reply_text(
-        f"Adding to <b>{h(d.title)}</b> (has {len(d.episodes)} eps, next is EP {last + 1}).\n"
+        f"Adding to <b>{h(d.title)}</b>{label} (has {len(sea.episodes) if sea else 0} eps, next is EP {last + 1}).\n"
         f"Send links by quality, numbered from EP {last + 1}.\n" + LINK_HELP, parse_mode="HTML")
     return EP_LINKS
 
 
 async def addep_links(update, context):
-    return await _do_addep(update, context, context.user_data.pop("addep"), update.message.text)
+    info = context.user_data.pop("addep")
+    if isinstance(info, dict):
+        return await _do_addep(update, context, info["id"], update.message.text, info.get("season"))
+    return await _do_addep(update, context, info, update.message.text, None)
 
 
-async def _do_addep(update, context, drama_id, text):
+async def _do_addep(update, context, drama_id, text, season=None):
     db, svc, _ = deps(context)
     d = db.get_drama(drama_id)
-    last = max((e.number for e in d.episodes), default=0)
+    sea = d.season(season) if season else d.current
+    last = max((e.number for e in (sea.episodes if sea else [])), default=0)
     try:
         eps = parse_quality_links(text, None, start=last + 1)
     except ValueError as e:
-        context.user_data["addep"] = drama_id
+        context.user_data["addep"] = {"id": drama_id, "season": season or (sea.number if sea else 1)}
         await update.message.reply_text(f"⚠️ {e}. Try again or /cancel.")
         return EP_LINKS
     if not eps:
         await update.message.reply_text("No links given.")
         return ConversationHandler.END
-    await svc.add_episodes(d.id, eps)
-    await update.message.reply_text(f"✅ Added {describe_links(eps)} to {d.title}; channel post updated.")
+    sn = season or (sea.number if sea else None)
+    await svc.add_episodes(d.id, eps, season=sn)
+    label = f" S{sn}" if d.is_multi or (sn and sn > 1) else ""
+    await update.message.reply_text(f"✅ Added {describe_links(eps)} to {d.title}{label}; channel post updated.")
     return ConversationHandler.END
 
 

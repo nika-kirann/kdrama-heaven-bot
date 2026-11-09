@@ -59,13 +59,23 @@ def _clip(text: str, room: int) -> str:
     return cut.rstrip(" ,.;:-") + "…" if cut else ""
 
 
+def _current_eps(d: Drama):
+    """(season_or_None, episodes_list, total_episodes) — season-aware with single-season fallback."""
+    cur = getattr(d, "current", None)
+    if cur is not None:
+        return cur, list(cur.episodes), cur.total_episodes
+    return None, list(getattr(d, "episodes", []) or []), getattr(d, "total_episodes", None)
+
+
 def next_air_info(d: Drama, tz=None, now=None):
     """(episode number, local air datetime, has_time) for an ongoing drama, or None.
-    Only shown when an admin set next_ep_date (today or later) via /edit <id> nextep."""
+    Only shown when an admin set next_ep_date (today or later) via /edit <id> nextep.
+    Refers to the current season's next episode."""
     if d.status == "Completed" or tz is None:
         return None
-    ep = max((e.number for e in d.episodes), default=0) + 1
-    if d.total_episodes and ep > d.total_episodes:
+    _, eps, total = _current_eps(d)
+    ep = max((e.number for e in eps), default=0) + 1
+    if total and ep > total:
         return None
     from datetime import date as _date, datetime as _dt
     now = (now or _dt.now(tz)).astimezone(tz)
@@ -103,19 +113,27 @@ def next_block(d: Drama, tz=None, now=None) -> str:
     date = f"{when:%B} {when.day}, {when.year}"
     t = f" · {when:%I:%M %p}".replace(" 0", " ") + " IST" if has_time else ""
     rel = countdown_text(when, now or _dt.now(tz))
+    cur = getattr(d, "current", None)
+    label = f"S{cur.number} Ep {ep}" if getattr(d, "is_multi", False) and cur else f"Ep {ep}"
     return (f"\n🟨 <b>NEXT EPISODE</b>\n┃ <b>{date}</b>{t}\n"
-            f"┃ <i>Ep {ep} · {DAYS[when.weekday()]} · {rel}</i>")
+            f"┃ <i>{label} · {DAYS[when.weekday()]} · {rel}</i>")
 
 
 def drama_card(d: Drama, limit: int = CAPTION_LIMIT, brand: str = "@kdrama_heaven",
                default_audio: str = DEFAULT_AUDIO, tz=None, now=None) -> str:
     """Aesthetic HTML card (fits Telegram's 1024 caption / 4096 text limit)."""
-    eps = len(d.episodes)
-    total = f"/{d.total_episodes}" if d.total_episodes else ""
+    cur, eps_list, tot = _current_eps(d)
+    eps = len(eps_list)
+    total = f"/{tot}" if tot else ""
     q = qualities(d)
     sub = " · ".join(x for x in [str(d.year) if d.year else "", "K-Drama"] if x)
-    rows = [("Status", f"<code>{badge(d.status)}</code>"),
-            ("Episodes", f"<code>{eps}{total}</code>")]
+    rows = [("Status", f"<code>{badge(d.status)}</code>")]
+    if getattr(d, "is_multi", False):
+        rows.append(("Seasons", f"<code>{len(d.seasons)}</code>"))
+        sn = cur.number if cur else 1
+        rows.append(("Episodes", f"<code>S{sn} · {eps}{total}</code>"))
+    else:
+        rows.append(("Episodes", f"<code>{eps}{total}</code>"))
     au = audio_tags(d, default_audio)
     if au:
         rows.append(("Audio", f"<code>{h(au)}</code>"))
@@ -233,28 +251,58 @@ class ChannelService:
         await self.post_card(d)
         return d
 
-    async def add_episodes(self, drama_id: int, episodes, start: int | None = None) -> list[int]:
-        """episodes: {ep: [(quality, url, kind)]} or a legacy list of URLs."""
+    async def add_episodes(self, drama_id: int, episodes, start: int | None = None,
+                           season: int | None = None) -> list[int]:
+        """episodes: {ep: [(quality, url, kind)]} or a legacy list of URLs. season=None → current."""
+        d0 = self.db.get_drama(drama_id)
+        cur = d0.season(season) if season else d0.current
         if isinstance(episodes, list):
-            first = start or max((e.number for e in self.db.get_drama(drama_id).episodes), default=0) + 1
+            first = start or max((e.number for e in (cur.episodes if cur else d0.episodes)), default=0) + 1
             episodes = {first + i: [("HD", u, "part")] for i, u in enumerate(episodes)}
-        nums = self.db.add_episodes(drama_id, episodes)
+        nums = self.db.add_episodes(drama_id, episodes, season=season)
         if self.db.get_drama(drama_id).next_ep_date:  # the date was for this episode: hide the block
             self.db.update_drama(drama_id, next_ep_date=None, air_time=None)
         await self.refresh_card(drama_id)
         d = self.db.get_drama(drama_id)
-        await self._send(f"🆕 <b>New episodes</b>: {h(d.title)} — {h(describe_links(episodes))} added! 📺",
+        sn = season or (d.current.number if d.current else 1)
+        prefix = f"S{sn} " if d.is_multi else ""
+        await self._send(f"🆕 <b>New episodes</b>: {h(d.title)} — {prefix}{h(describe_links(episodes))} added! 📺",
                          "service", drama_id)
-        await self.notify_followers(drama_id, f"🆕 {h(describe_links(episodes))} just landed!")
+        await self.notify_followers(drama_id, f"🆕 {prefix}{h(describe_links(episodes))} just landed!")
         return nums
 
-    async def complete(self, drama_id: int):
-        self.db.update_drama(drama_id, status="Completed")
+    async def new_season(self, drama_id: int, total_episodes: int | None = None):
+        sea = self.db.add_season(drama_id, total_episodes)
         await self.refresh_card(drama_id)
         d = self.db.get_drama(drama_id)
-        await self._send(f"✅ <b>{h(d.title)}</b> is now COMPLETED! Binge all {len(d.episodes)} episodes.",
+        tot = f" ({sea.total_episodes} eps planned)" if sea.total_episodes else ""
+        await self._send(f"🆕 <b>{h(d.title)}</b> — Season {sea.number} is here!{tot}",
                          "service", drama_id)
-        await self.notify_followers(drama_id, f"✅ The series is complete. All {len(d.episodes)} episodes are up, binge time!")
+        await self.notify_followers(
+            drama_id, f"🎬 <b>Season {sea.number} is here!</b> I'll ping you as new episodes drop.")
+        return sea
+
+    async def complete(self, drama_id: int, season: int | None = None):
+        """Complete the current (or given) season; complete the drama only when every season is done."""
+        sea, done = self.db.complete_season(drama_id, season)
+        await self.refresh_card(drama_id)
+        d = self.db.get_drama(drama_id)
+        n_eps = len(sea.episodes)
+        if done:
+            total = sum(len(x.episodes) for x in d.seasons)
+            await self._send(f"✅ <b>{h(d.title)}</b> is now COMPLETED! Binge all {total} episodes"
+                             + (f" across {len(d.seasons)} seasons" if d.is_multi else "") + ".",
+                             "service", drama_id)
+            await self.notify_followers(
+                drama_id, f"✅ The series is complete. All {total} episodes are up, binge time!")
+        else:
+            label = f"Season {sea.number}" if (d.is_multi or sea.number > 1) else "Season 1"
+            extra = (f" Season {d.current.number} is current."
+                     if d.current and d.current.number != sea.number else "")
+            await self._send(f"✅ <b>{h(d.title)}</b> — {label} completed ({n_eps} eps).{extra}",
+                             "service", drama_id)
+            await self.notify_followers(
+                drama_id, f"✅ Season {sea.number} is complete ({n_eps} eps). More seasons may follow!")
 
     async def delete(self, drama_id: int) -> bool:
         self.db.mark_deleted(drama_id)
@@ -289,10 +337,17 @@ class ChannelService:
         if not new:
             return None
         lines = ["📅 <b>New episodes today</b>\n"]
-        for did, nums in new.items():
+        for did, pairs in new.items():
             d = self.db.get_drama(did)
-            rng = f"EP {nums[0]}" if len(nums) == 1 else f"EP {nums[0]}–{nums[-1]}"
-            lines.append(f"• <b>{h(d.title)}</b> — {rng} {'✅' if d.status == 'Completed' else '🔄'}")
+            # group by season
+            by: dict[int, list[int]] = {}
+            for sn, n in pairs:
+                by.setdefault(sn, []).append(n)
+            bits = []
+            for sn, nums in by.items():
+                rng = f"EP {nums[0]}" if len(nums) == 1 else f"EP {nums[0]}–{nums[-1]}"
+                bits.append((f"S{sn} " if d.is_multi else "") + rng)
+            lines.append(f"• <b>{h(d.title)}</b> — {', '.join(bits)} {'✅' if d.status == 'Completed' else '🔄'}")
         return await self._send("\n".join(lines), "digest")
 
     async def run_schedule(self, sid: int):
@@ -331,8 +386,12 @@ class ChannelService:
         out = {"sent": 0, "blocked": 0, "skipped": 0}
         if not d:
             return out
+        cur, eps_list, tot = _current_eps(d)
+        prog = f"{len(eps_list)}{'/' + str(tot) if tot else ''}"
+        if d.is_multi and cur:
+            prog = f"S{cur.number} · {prog}"
         text = (f"🔔 <b>New for you</b> ✦\n\n✦ <b>{h(d.title)}</b> ✦\n{headline}\n\n"
-                f"<i>{len(d.episodes)}{'/' + str(d.total_episodes) if d.total_episodes else ''} episodes · "
+                f"<i>{prog} episodes · "
                 f"{'COMPLETED ✅' if d.status == 'Completed' else 'ONGOING 🔄'}</i>")
         link = self.deep_link(f"drama_{d.id}")
         rows = [[InlineKeyboardButton("▶️ Watch now", url=link)]] if link else []
@@ -396,7 +455,7 @@ class ChannelService:
         lpq = db.links_per_quality()
         return ("📊 <b>kdrama_heaven stats</b>\n"
                 f"Dramas: {s['dramas']} (🔄 {s['ongoing']} ongoing / ✅ {s['completed']} completed)\n"
-                f"Episodes: {s['episodes']} · Posts today: {s['posts_today']}\n"
+                f"Seasons: {s.get('seasons', 0)} · Episodes: {s['episodes']} · Posts today: {s['posts_today']}\n"
                 f"Requests: {s['requests']} · Pending schedules: {s['pending_schedules']}\n"
                 f"⚠️ Open reports: {db.open_reports(0)[0]}\n"
                 + (f"Links per quality: {', '.join(f'{h(q)} {n}' for q, n in lpq.items())}\n" if lpq else "")

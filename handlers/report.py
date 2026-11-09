@@ -37,6 +37,9 @@ async def begin(send, context, uid, d):
                           f"Please wait about {left} min before sending another.", parse_mode=ParseMode.HTML)
     context.user_data.pop("awaiting", None)
     context.user_data["report"] = {"drama": d.id}
+    if d.is_multi:
+        return await send(f"⚠️ <b>Report a problem</b> · {h(d.title)}\nWhich season?",
+                          parse_mode=ParseMode.HTML, reply_markup=kb.report_seasons(d))
     await send(f"⚠️ <b>Report a problem</b> · {h(d.title)}\nWhat's wrong?",
                parse_mode=ParseMode.HTML, reply_markup=kb.report_reasons(d.id))
 
@@ -51,6 +54,25 @@ async def on_report(update: Update, context):
     await begin(q.message.reply_text, context, q.from_user.id, d)
 
 
+async def on_season(update: Update, context):
+    db, _, _ = deps(context)
+    q = update.callback_query
+    _, did, sn = q.data.split(":")
+    d = db.get_drama(int(did))
+    if not d or d.deleted or not d.season(int(sn)):
+        return await q.answer("That season isn't available.", show_alert=True)
+    await q.answer()
+    context.user_data["report"] = {"drama": d.id, "season": int(sn)}
+    await safe_call(q.edit_message_text, f"⚠️ <b>Report</b> · {h(d.title)} S{sn}\nWhat's wrong?",
+                    parse_mode=ParseMode.HTML, reply_markup=kb.report_reasons(d.id))
+
+
+async def _ask_reason_after_skip_season(q, context, d):
+    context.user_data["report"] = {"drama": d.id, "season": d.current.number if d.current else None}
+    await safe_call(q.edit_message_text, f"⚠️ <b>Report a problem</b> · {h(d.title)}\nWhat's wrong?",
+                    parse_mode=ParseMode.HTML, reply_markup=kb.report_reasons(d.id))
+
+
 async def on_reason(update: Update, context):
     db, _, _ = deps(context)
     q = update.callback_query
@@ -59,17 +81,21 @@ async def on_reason(update: Update, context):
     if not d or d.deleted or code not in kb.REPORT_REASONS:
         return await q.answer("That drama is no longer available.", show_alert=True)
     await q.answer()
-    context.user_data["report"] = {"drama": d.id, "reason": code}
+    rep = context.user_data.setdefault("report", {"drama": d.id})
+    rep["drama"], rep["reason"] = d.id, code
     label = kb.REPORT_REASONS[code]
+    sn = rep.get("season")
+    sea = d.season(sn) if sn else d.current
+    title = f"{h(d.title)}" + (f" S{sn}" if sn and d.is_multi else "")
     if code in EP_REASONS:
         context.user_data["awaiting"] = "report_ep"
-        last = d.episodes[-1].number if d.episodes else 0
+        last = sea.episodes[-1].number if sea and sea.episodes else 0
         return await safe_call(q.edit_message_text,
-                               f"⚠️ <b>{h(d.title)}</b> · {label}\nWhich episode? Send a number"
+                               f"⚠️ <b>{title}</b> · {label}\nWhich episode? Send a number"
                                + (f" (1–{last})" if last else "") + ", or tap Skip.",
                                parse_mode=ParseMode.HTML, reply_markup=kb.skip("ep"))
     context.user_data["awaiting"] = "report_note"
-    await safe_call(q.edit_message_text, f"⚠️ <b>{h(d.title)}</b> · {label}\n"
+    await safe_call(q.edit_message_text, f"⚠️ <b>{title}</b> · {label}\n"
                     "Describe the problem in a message, or tap Skip.",
                     parse_mode=ParseMode.HTML, reply_markup=kb.skip("note"))
 
@@ -79,9 +105,16 @@ async def _ask_note(send):
 
 
 async def on_skip(update: Update, context):
+    db, _, _ = deps(context)
     q = update.callback_query
     step = q.data.split(":")[1]
     rep = context.user_data.get("report")
+    if step == "sea":
+        d = db.get_drama((rep or {}).get("drama", 0))
+        if not d:
+            return await q.answer("This report expired. Tap ⚠️ Report again.", show_alert=True)
+        await q.answer()
+        return await _ask_reason_after_skip_season(q, context, d)
     if not rep or "reason" not in rep:
         return await q.answer("This report expired. Tap ⚠️ Report again.", show_alert=True)
     await q.answer()
@@ -119,16 +152,30 @@ async def submit(send, context, user, note):
     left = _cooldown_left(db, user.id, d.id)
     if left:
         return await send(f"⏳ You already reported this drama recently. Please wait about {left} min.")
-    r = db.add_report(d.id, user.id, user.username, rep["reason"], rep.get("episode"), note or None)
-    await svc.notify_admins(admin_text(r, d.title, _who(user)), kb.report_admin(r.id))
+    season = rep.get("season")
+    if season is None and d.is_multi and d.current:
+        season = d.current.number
+    if not d.is_multi:
+        season = None  # keep single-season reports clean
+    r = db.add_report(d.id, user.id, user.username, rep["reason"], rep.get("episode"), note or None,
+                      season=season)
+    await svc.notify_admins(admin_text(r, d.title, _who(user), multi=d.is_multi), kb.report_admin(r.id))
     await send(f"💜 Thanks! Report <code>#{r.id}</code> was sent to the admins. "
                "I'll message you when it's fixed.", parse_mode=ParseMode.HTML)
 
 
-def admin_text(r, title, who):
+def admin_text(r, title, who, multi=False):
+    if r.episode and r.season and (multi or r.season > 1):
+        ep = f"S{r.season} EP {r.episode}"
+    elif r.episode:
+        ep = str(r.episode)
+    elif r.season and (multi or r.season > 1):
+        ep = f"S{r.season}"
+    else:
+        ep = "-"
     return (f"⚠️ <b>Report #{r.id}</b>\n"
             f"🎬 <b>{h(title)}</b> <code>#{r.drama_id}</code>\n"
-            f"📺 Episode: {r.episode if r.episode else '-'}\n"
+            f"📺 Episode: {ep}\n"
             f"❓ Reason: {kb.REPORT_REASONS.get(r.reason, r.reason)}\n"
             + (f"📝 {h(r.note)}\n" if r.note else "")
             + f"👤 From {who} (<code>{r.user_id}</code>)")
@@ -148,15 +195,18 @@ async def on_resolve(update: Update, context):
     r = db.set_report_status(r.id, status)
     d = db.get_drama(r.drama_id)
     title = d.title if d else f"#{r.drama_id}"
+    multi = bool(d and d.is_multi)
     await q.answer(STATUS_LABEL[status])
     who = f"@{h(r.username)}" if r.username else str(r.user_id)
-    await safe_call(q.edit_message_text, admin_text(r, title, who) + f"\n\n{STATUS_LABEL[status]} by {_who(q.from_user)}",
+    await safe_call(q.edit_message_text,
+                    admin_text(r, title, who, multi=multi) + f"\n\n{STATUS_LABEL[status]} by {_who(q.from_user)}",
                     parse_mode=ParseMode.HTML)
     if status == "fixed":
+        sea = f" S{r.season}" if r.season and multi else ""
         ep = f" EP {r.episode}" if r.episode else ""
         try:
             await safe_call(context.bot.send_message, r.user_id,
-                            f"✅ Fixed! Your report <code>#{r.id}</code> for <b>{h(title)}</b>{ep} "
+                            f"✅ Fixed! Your report <code>#{r.id}</code> for <b>{h(title)}</b>{sea}{ep} "
                             f"({kb.REPORT_REASONS.get(r.reason, r.reason)}) was resolved. Thanks for helping! 💜",
                             parse_mode=ParseMode.HTML)
         except Exception as e:
@@ -169,15 +219,18 @@ async def reports_cmd(update: Update, context):
     n, rows = db.open_reports()
     if not n:
         return await update.message.reply_text("✅ No open reports.")
-    titles = {}
+    titles, multi = {}, {}
     lines = [f"⚠️ <b>Open reports</b> ({n})"]
     for r in rows:
         if r.drama_id not in titles:
             d = db.get_drama(r.drama_id)
             titles[r.drama_id] = d.title if d else f"#{r.drama_id}"
+            multi[r.drama_id] = bool(d and d.is_multi)
         who = f"@{h(r.username)}" if r.username else f"<code>{r.user_id}</code>"
-        lines.append(f"<code>#{r.id}</code> {h(titles[r.drama_id])}"
-                     f"{f' · EP {r.episode}' if r.episode else ''} · {kb.REPORT_REASONS.get(r.reason, r.reason)}"
+        sea = f"S{r.season} " if r.season and multi.get(r.drama_id) else ""
+        ep = f" · {sea}EP {r.episode}" if r.episode else (f" · {sea.strip()}" if sea else "")
+        lines.append(f"<code>#{r.id}</code> {h(titles[r.drama_id])}{ep}"
+                     f" · {kb.REPORT_REASONS.get(r.reason, r.reason)}"
                      f" · {who}" + (f"\n    📝 {h(r.note[:80])}" if r.note else ""))
     if n > len(rows):
         lines.append(f"…and {n - len(rows)} more")
@@ -189,8 +242,9 @@ async def reports_cmd(update: Update, context):
 def handlers():
     return [
         CallbackQueryHandler(on_report, pattern=r"^rep:\d+$"),
+        CallbackQueryHandler(on_season, pattern=r"^rs:\d+:\d+$"),
         CallbackQueryHandler(on_reason, pattern=r"^rr:\d+:[mwbo]$"),
-        CallbackQueryHandler(on_skip, pattern=r"^rsk:(ep|note)$"),
+        CallbackQueryHandler(on_skip, pattern=r"^rsk:(ep|note|sea)$"),
         CallbackQueryHandler(on_resolve, pattern=r"^rp[fd]:\d+$"),
         CommandHandler("reports", reports_cmd),
     ]

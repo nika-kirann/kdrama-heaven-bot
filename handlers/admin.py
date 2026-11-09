@@ -13,16 +13,58 @@ log = logging.getLogger(__name__)
 EDIT_FIELDS = {"title", "synopsis", "genres", "year", "poster", "total", "status", "repost", "links", "quality", "audio", "imdb", "nextep"}
 
 
+def _parse_season_ref(text: str):
+    """'<drama> [sN]' -> (drama_ref, season_or_None)."""
+    text = (text or "").strip()
+    bits = text.rsplit(maxsplit=1)
+    if len(bits) == 2 and bits[1].lower().startswith("s") and bits[1][1:].isdigit():
+        return bits[0], int(bits[1][1:])
+    return text, None
+
+
 @admin_only
 async def complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db, svc, _ = deps(context)
-    d = db.find_drama(arg_text(update))
+    ref, season = _parse_season_ref(arg_text(update))
+    d = db.find_drama(ref)
     if not d:
-        return await update.message.reply_text("Usage: /complete <drama title or id>")
-    if d.status == "Completed":
+        return await update.message.reply_text("Usage: /complete <drama title or id> [sN]")
+    if season is not None:
+        if not d.season(season):
+            return await update.message.reply_text(f"{d.title} has no Season {season}.")
+        if d.season(season).status == "Completed":
+            return await update.message.reply_text(f"{d.title} Season {season} is already completed.")
+    elif d.status == "Completed":
         return await update.message.reply_text(f"{d.title} is already completed.")
-    await svc.complete(d.id)
-    await update.message.reply_text(f"✅ {d.title} marked COMPLETED and the post was updated.")
+    target = season or (d.current.number if d.current else 1)
+    await svc.complete(d.id, season)
+    d = db.get_drama(d.id)
+    if d.status == "Completed":
+        await update.message.reply_text(f"✅ {d.title} fully COMPLETED (all seasons) and the post was updated.")
+    else:
+        await update.message.reply_text(f"✅ {d.title} Season {target} completed; drama still ongoing.")
+
+
+@admin_only
+async def newseason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db, svc, _ = deps(context)
+    raw = arg_text(update)
+    parts = raw.rsplit(maxsplit=1)
+    total = None
+    if len(parts) == 2 and parts[1].isdigit() and db.find_drama(parts[0]):
+        ref, total = parts[0], int(parts[1])
+    else:
+        ref = raw
+    d = db.find_drama(ref)
+    if not d:
+        return await update.message.reply_text("Usage: /newseason <drama id or title> [total_eps]")
+    sea = await svc.new_season(d.id, total)
+    await update.message.reply_text(
+        f"🆕 {d.title} Season {sea.number} started"
+        + (f" ({sea.total_episodes} eps planned)" if sea.total_episodes else "")
+        + "; channel post updated, followers notified.")
+
+
 
 
 @admin_only
@@ -30,20 +72,49 @@ async def edit(update: Update, context):
     db, svc, _ = deps(context)
     args = arg_text(update)
     msg = update.effective_message
-    # format: /edit <id> <field> <value>   (id is required here to avoid ambiguity)
-    parts = args.split(maxsplit=2)
-    if len(parts) < 2 or not parts[0].isdigit() or parts[1].lower() not in EDIT_FIELDS:
-        return await msg.reply_text(
-            "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, total, status, audio, imdb, nextep, repost, links, quality\n"
-            "/edit 3 nextep 2026-11-11 [20:00]   (next-episode date, optional IST time; cleared on /addep; - to clear)\n"
-            "Examples:\n/edit 3 year 2024\n"
-            "/edit 3 poster: send a photo with that caption, reply to a photo with it, add an https URL, "
-            "or send it alone and then the photo\n/edit 3 quality 520p 720p   (rename; use - to delete a quality)\n"
-            "/edit 3 links\nEP 5\n1080p: https://x/ep5.mkv\n(replaces those qualities for those episodes)")
+    # format: /edit <id> <field> <value>  OR  /edit <id> sN <field> <value>
+    parts = args.split(maxsplit=3)
+    season_edit = None
+    if len(parts) >= 3 and parts[0].isdigit() and parts[1].lower().startswith("s") and parts[1][1:].isdigit():
+        season_edit = int(parts[1][1:])
+        field = parts[2].lower()
+        value = (parts[3] if len(parts) > 3 else "").strip()
+        # alias: eps → total
+        if field == "eps":
+            field = "total"
+        if field not in {"total", "status"}:
+            return await msg.reply_text("Season fields: /edit <id> sN total <n>   or   /edit <id> sN status Ongoing|Completed")
+    else:
+        parts = args.split(maxsplit=2)
+        if len(parts) < 2 or not parts[0].isdigit() or parts[1].lower() not in EDIT_FIELDS:
+            return await msg.reply_text(
+                "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, total, status, audio, imdb, nextep, repost, links, quality\n"
+                "/edit 3 s2 total 16   (season-specific total)\n"
+                "/edit 3 nextep 2026-11-11 [20:00]   (next-episode date, optional IST time; cleared on /addep|/newseason; - to clear)\n"
+                "Examples:\n/edit 3 year 2024\n"
+                "/edit 3 poster: send a photo with that caption, reply to a photo with it, add an https URL, "
+                "or send it alone and then the photo\n/edit 3 quality 520p 720p   (rename; use - to delete a quality)\n"
+                "/edit 3 links\nEP 5\n1080p: https://x/ep5.mkv\n(replaces those qualities for those episodes)")
+        field, value = parts[1].lower(), (parts[2] if len(parts) > 2 else "").strip()
     d = db.find_drama(parts[0])
     if not d:
         return await update.message.reply_text("No drama with that id.")
-    field, value = parts[1].lower(), (parts[2] if len(parts) > 2 else "").strip()
+    if season_edit is not None:
+        if not d.season(season_edit):
+            return await msg.reply_text(f"{d.title} has no Season {season_edit}.")
+        try:
+            if field == "total":
+                if not value.isdigit():
+                    raise ValueError("needs a number")
+                db.update_season(d.id, season_edit, total_episodes=int(value))
+            else:
+                if value.title() not in {"Ongoing", "Completed"}:
+                    raise ValueError("must be Ongoing or Completed")
+                db.update_season(d.id, season_edit, status=value.title())
+        except ValueError as e:
+            return await msg.reply_text(f"⚠️ {field} {e}")
+        await svc.refresh_card(d.id)
+        return await msg.reply_text(f"✏️ Updated Season {season_edit} {field} for {d.title}; channel post edited.")
     if field == "poster":
         return await edit_poster(update, context, d, value)
     if field == "links":
@@ -71,14 +142,31 @@ async def edit(update: Update, context):
         await svc.post_card(d)
         return await update.message.reply_text("📤 Reposted the card to the channel.")
     try:
-        if field in {"year", "total"}:
+        if field == "year":
             if not value.isdigit():
                 raise ValueError("needs a number")
-            changes = {"year" if field == "year" else "total_episodes": int(value)}
+            changes = {"year": int(value)}
+        elif field == "total":
+            if not value.isdigit():
+                raise ValueError("needs a number")
+            # drama-level total edits the current season's total (and mirrors onto the drama)
+            cur = d.current.number if d.current else 1
+            db.update_season(d.id, cur, total_episodes=int(value))
+            await svc.refresh_card(d.id)
+            return await msg.reply_text(f"✏️ Updated total for {d.title} S{cur}; channel post edited.")
         elif field == "status":
             if value.title() not in {"Ongoing", "Completed"}:
                 raise ValueError("must be Ongoing or Completed")
-            changes = {"status": value.title()}
+            if value.title() == "Completed":
+                # complete every season
+                for sea in d.seasons:
+                    if sea.status != "Completed":
+                        db.update_season(d.id, sea.number, status="Completed")
+            else:
+                cur = d.current.number if d.current else 1
+                db.update_season(d.id, cur, status="Ongoing")
+            await svc.refresh_card(d.id)
+            return await msg.reply_text(f"✏️ Updated status for {d.title}; channel post edited.")
         elif field == "nextep":
             from datetime import date as _date
             if value == "-":
@@ -180,18 +268,50 @@ async def cancel_poster(update: Update, context):
 @admin_only
 async def delete(update: Update, context):
     db, svc, _ = deps(context)
-    d = db.find_drama(arg_text(update))
+    ref, season = _parse_season_ref(arg_text(update))
+    d = db.find_drama(ref)
     if not d:
-        return await update.message.reply_text("Usage: /delete <drama title or id>")
+        return await update.message.reply_text("Usage: /delete <drama title or id> [sN]")
+    if season is not None:
+        if not d.season(season):
+            return await update.message.reply_text(f"{d.title} has no Season {season}.")
+        if len(d.seasons) <= 1:
+            return await update.message.reply_text("Can't delete the only season — /delete the whole drama instead.")
+        return await update.message.reply_text(
+            f"Delete <b>{h(d.title)}</b> Season {season} ({len(d.season(season).episodes)} eps)? This can't be undone.",
+            parse_mode="HTML", reply_markup=kb.confirm_delete_season(d.id, season))
     ok = await svc.delete(d.id)
     note = "" if ok else "\n(Telegram wouldn't delete the post now; /cleanup will retry. Posts older than 48h must be deleted by hand.)"
     await update.message.reply_text(f"🗑 Deleted {d.title}.{note}")
 
 
+@admin_only
+async def delete_season_confirm(update: Update, context):
+    db, svc, _ = deps(context)
+    q = update.callback_query
+    if q.data == "delno":
+        await q.answer("Cancelled")
+        return await q.edit_message_text("Cancelled 👍")
+    _, did, sn = q.data.split(":")
+    d = db.get_drama(int(did))
+    if not d or not d.season(int(sn)):
+        return await q.answer("Already gone.", show_alert=True)
+    ok = db.delete_season(d.id, int(sn))
+    await q.answer("Deleted" if ok else "Failed")
+    if ok:
+        await svc.refresh_card(d.id)
+        await q.edit_message_text(f"🗑 Deleted {d.title} Season {sn}; channel post updated.")
+    else:
+        await q.edit_message_text("Couldn't delete that season (is it the last one?).")
+
+
 def _list_page(db, page: int):
     dramas, total = db.list_dramas(offset=page * kb.PER_PAGE, limit=kb.PER_PAGE, order="title")
     lines = [f"📚 <b>Dramas</b> ({total})"] + [
-        f"<code>{d.id}</code> {h(d.title)} — {d.status}, {len(d.episodes)} eps" for d in dramas]
+        f"<code>{d.id}</code> {h(d.title)} — {d.status}, "
+        + (f"{len(d.seasons)} seasons, S{d.current.number} {len(d.current.episodes)}"
+           f"{'/' + str(d.current.total_episodes) if d.current and d.current.total_episodes else ''} eps"
+           if d.is_multi else f"{len(d.episodes)} eps") for d in dramas]
     return "\n".join(lines), kb.drama_list(dramas, total, page, "list")
 
 
@@ -287,15 +407,19 @@ async def digest_now(update: Update, context):
 async def admin_help(update: Update, context):
     await update.message.reply_text(
         "🛠 <b>Admin commands</b>\n"
-        "/add — new drama wizard\n/addep &lt;drama&gt; — add episodes\n/complete &lt;drama&gt;\n"
-        "/edit &lt;id&gt; &lt;field&gt; &lt;value&gt;\n/delete &lt;drama&gt;\n/list\n/stats\n/reports — open viewer reports\n"
+        "/add — new drama wizard\n/addep &lt;drama&gt; [sN] — add episodes\n"
+        "/newseason &lt;drama&gt; [total_eps]\n/complete &lt;drama&gt; [sN]\n"
+        "/edit &lt;id&gt; &lt;field&gt; &lt;value&gt;  (also: /edit &lt;id&gt; sN total 16)\n"
+        "/delete &lt;drama&gt; [sN]\n/list\n/stats\n/reports — open viewer reports\n"
         "/schedule &lt;drama|-&gt; YYYY-MM-DD HH:MM &lt;text&gt;\n/schedules, /unschedule &lt;id&gt;\n"
         "/cleanup\n/digest — post today's digest now\n/cancel", parse_mode="HTML")
 
 
 def handlers():
     return [
-        CommandHandler("complete", complete), CommandHandler("edit", edit), CommandHandler("delete", delete),
+        CommandHandler("complete", complete), CommandHandler("newseason", newseason),
+        CommandHandler("edit", edit), CommandHandler("delete", delete),
+        CallbackQueryHandler(delete_season_confirm, pattern=r"^(delok:\d+:\d+|delno)$"),
         CommandHandler("list", list_cmd), CallbackQueryHandler(list_page, pattern=r"^list:\d+$"),
         CommandHandler("stats", stats), CommandHandler("schedule", schedule),
         CommandHandler("schedules", schedules), CommandHandler("unschedule", unschedule),
