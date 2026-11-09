@@ -185,7 +185,12 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if fn_m is not None:
                     files[name] = (fn_m.group(1), body)
                 else:
-                    fields[name] = body.decode("utf-8", "replace")
+                    val = body.decode("utf-8", "replace")
+                    if name in fields:
+                        prev = fields[name]
+                        fields[name] = (prev if isinstance(prev, list) else [prev]) + [val]
+                    else:
+                        fields[name] = val
             return fields, files
         qs = parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True)
         fields = {k: (v if len(v) > 1 else v[-1]) for k, v in qs.items()}

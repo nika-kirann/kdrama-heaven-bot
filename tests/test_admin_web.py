@@ -102,10 +102,23 @@ def web(tmp_path):
             self._opener = opener
             self.jar = jar
 
-        def open(self, path, data=None, method=None):
+        def open(self, path, data=None, method=None, multipart=False):
             headers = {}
             body = None
-            if data is not None:
+            if data is not None and multipart:
+                boundary = "----TestBoundary7MA4YWxkTrZu0gW"
+                chunks = []
+                for k, v in data.items():
+                    vals = v if isinstance(v, list) else [v]
+                    for item in vals:
+                        chunks.append(
+                            f"--{boundary}\r\nContent-Disposition: form-data; "
+                            f'name="{k}"\r\n\r\n{item}\r\n'
+                        )
+                chunks.append(f"--{boundary}--\r\n")
+                body = "".join(chunks).encode()
+                headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+            elif data is not None:
                 body = urllib.parse.urlencode(data, doseq=True).encode()
                 headers["Content-Type"] = "application/x-www-form-urlencoded"
             req = urllib.request.Request(self.base + path, data=body, headers=headers, method=method)
@@ -271,6 +284,8 @@ def test_add_drama_structured_links(web):
     web.login_password()
     _, body, _ = web.open("/admin/add")
     assert "From episode" in body and "＋ Part" in body and 'name="480p"' in body
+    assert 'type="url" name="480p"' not in body
+    assert 'type="text" class="link" name="480p"' in body
     csrf = web.csrf_from(body)
     # no links → drama with 0 episodes
     web.open("/admin/add", {"csrf": csrf, "title": "Empty Eps", "status": "Ongoing", "total": "16"})
@@ -300,3 +315,26 @@ def test_add_drama_structured_links(web):
     groups = dict(ep1.quality_groups())
     assert [l.url for l in groups["720p"]] == ["https://a/1-p1", "https://a/1-p2", "https://m/1"]
     assert groups["1080p"][0].url == "https://b/1"
+
+
+def test_add_drama_expands_ep_over_multipart(web):
+    """Browser posts multipart; {ep} must expand and repeated quality fields must all be kept."""
+    web.login_password()
+    _, body, _ = web.open("/admin/add")
+    csrf = web.csrf_from(body)
+    web.open("/admin/add", {
+        "csrf": csrf, "title": "Multipart Show", "status": "Ongoing", "total": "3",
+        "ep_from": "1", "ep_to": "3",
+        "480p": "https://x/{ep}.mkv",
+        "720p": ["https://a/{ep}-p1", "https://a/{ep}-p2"],
+        "1080p": "https://b/{episode}.mkv",
+    }, multipart=True)
+    d = web.db.find_drama("Multipart Show")
+    assert d, "drama was not created"
+    assert [e.number for e in d.episodes] == [1, 2, 3]
+    groups = dict(d.episodes[0].quality_groups())
+    assert [l.url for l in groups["480p"]] == ["https://x/1.mkv"]
+    assert [l.url for l in groups["720p"]] == ["https://a/1-p1", "https://a/1-p2"]
+    assert [l.url for l in groups["1080p"]] == ["https://b/1.mkv"]
+    groups3 = dict(d.episodes[2].quality_groups())
+    assert [l.url for l in groups3["480p"]] == ["https://x/3.mkv"]

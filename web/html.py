@@ -33,7 +33,7 @@ def layout(title: str, body: str, *, nav: str = "dashboard", admin_id: int | Non
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{e(title)} · kdrama_heaven</title>
-<link rel="stylesheet" href="/admin/static/admin.css">
+<link rel="stylesheet" href="/admin/static/admin.css?v=2">
 </head><body>
 <header class="top">
   <div class="brand">✦ <span>kdrama_heaven</span> admin</div>
@@ -46,7 +46,7 @@ def layout(title: str, body: str, *, nav: str = "dashboard", admin_id: int | Non
 {body}
 <p class="muted" style="margin-top:28px;font-size:12px">{who} · Telegram commands still work</p>
 </main>
-<script src="/admin/static/admin.js"></script>
+<script src="/admin/static/admin.js?v=2"></script>
 </body></html>"""
 
 
@@ -75,7 +75,7 @@ def login_page(*, has_password: bool, flash_msg: str | None = None, flash_kind: 
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Login · kdrama_heaven</title>
-<link rel="stylesheet" href="/admin/static/admin.css">
+<link rel="stylesheet" href="/admin/static/admin.css?v=2">
 </head><body>
 <div class="login-wrap">
   <div class="card login-card">
@@ -101,7 +101,7 @@ def login_page(*, has_password: bool, flash_msg: str | None = None, flash_kind: 
     {pwd_tab}
   </div>
 </div>
-<script src="/admin/static/admin.js"></script>
+<script src="/admin/static/admin.js?v=2"></script>
 </body></html>"""
 
 

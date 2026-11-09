@@ -22,8 +22,8 @@ def quality_blocks(prefix: str = "") -> str:
             f'<div class="q-title">{q}</div>'
             f'<div class="q-parts">'
             f'<label>{q} · Part 1</label>'
-            f'<input type="url" name="{q}" placeholder="https://…/{{ep}}.mkv" '
-            f'inputmode="url" autocomplete="off">'
+            f'<input type="text" class="link" name="{q}" placeholder="https://…/{{ep}}.mkv" '
+            f'inputmode="url" autocomplete="off" spellcheck="false">'
             f'</div>'
             f'<div class="q-mirrors"></div>'
             f'<div class="q-actions">'
@@ -93,7 +93,9 @@ def add_drama_links_section(*, err: str = "") -> str:
         '<div class="ep-box" id="add-links">'
         '<h3 style="margin:0 0 6px">Season 1 episodes <span class="muted">(optional)</span></h3>'
         '<p class="muted" style="margin-top:0">Leave empty to create the drama with no episodes yet. '
-        'URLs may include <code>{ep}</code> — it expands for each number from → to.</p>'
+        'Paste your links and put <code>{ep}</code> where the episode number goes. '
+        'It will be replaced for every episode from → to when you create the drama.</p>'
+        '<p class="muted" id="ep-expand-preview" style="color:var(--gold)"></p>'
         f'{err_html}'
         '<div class="row">'
         '<div><label>From episode</label>'
@@ -135,6 +137,8 @@ def expand_quality_range(fields: dict, field_get, field_list) -> tuple[dict, str
     for n in range(a, b + 1):
         links = []
         for q, tmpl, kind in templates:
-            links.append((q, tmpl.replace("{ep}", str(n)).replace("{EP}", str(n)), kind))
+            filled = (tmpl.replace("{episode}", str(n)).replace("{EPISODE}", str(n))
+                          .replace("{ep}", str(n)).replace("{EP}", str(n)))
+            links.append((q, filled, kind))
         out[n] = links
     return out, None

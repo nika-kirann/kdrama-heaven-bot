@@ -116,4 +116,5 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 6px
 .q-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .btn-sm { padding: 7px 10px; font-size: 12px; }
 .q-mirrors:empty { display: none; }
-#addep-form input[type=url] { margin-bottom: 4px; }
+#addep-form .q-block input, #add-links .q-block input { margin-bottom: 4px; }
+input::placeholder { color: #6b7a96; opacity: 1; }
