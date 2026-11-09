@@ -55,6 +55,8 @@ class Config:
     countdown_time: str = field(default_factory=lambda: os.getenv("COUNTDOWN_TIME", "00:05"))
     weekly_summary: bool = field(default_factory=lambda: os.getenv("WEEKLY_SUMMARY", "1").strip().lower() not in {"0", "false", "no", "off"})
     weekly_summary_time: str = field(default_factory=lambda: os.getenv("WEEKLY_SUMMARY_TIME", "10:00"))
+    admin_web_password: str = field(default_factory=lambda: os.getenv("ADMIN_WEB_PASSWORD", "").strip())
+    admin_web_secret: str = field(default_factory=lambda: os.getenv("ADMIN_WEB_SECRET", "").strip())
 
     @property
     def brand_handle(self) -> str:

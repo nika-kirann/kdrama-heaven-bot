@@ -17,6 +17,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # App code (main.py must be at /app/main.py)
 COPY main.py config.py db.py services.py keyboards.py jobs.py utils.py storage.py health.py ./
 COPY handlers ./handlers
+COPY web ./web
+COPY banner.py ./
+COPY assets ./assets
 COPY run.sh ./
 RUN chmod +x run.sh
 

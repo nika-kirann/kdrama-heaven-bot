@@ -31,4 +31,6 @@ service:
     CLEANUP_DAYS: "2"
     CLEANUP_TIME: "03:30"
     DATABASE_URL: sqlite:////tmp/kdrama.db
+    # Optional web admin password (Telegram code login always available for ADMIN_IDS):
+    # ADMIN_WEB_PASSWORD: "@ADMIN_WEB_PASSWORD"
 # Paid alternative (never sleeps, no pinger needed): type: worker, instance_type: eco-nano, regions: [sin]

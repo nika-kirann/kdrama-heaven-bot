@@ -601,6 +601,10 @@ class Database:
             s.commit()
             return r
 
+    def list_requests(self, limit: int = 50) -> list[Request]:
+        with self.session() as s:
+            return list(s.scalars(select(Request).order_by(Request.id.desc()).limit(limit)))
+
     # ---- users / follows / clicks ------------------------------------
     def touch_user(self, user_id: int, username: str | None = None, started: bool = False) -> bool:
         """Record a user; returns True if new. started=True when they messaged the bot in private."""
