@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import auth as authlib
 from . import html as H
-from .forms import add_episode_form
+from .forms import add_drama_links_section, add_episode_form, expand_quality_range
 
 log = logging.getLogger(__name__)
 STARTED = time.time()
@@ -551,18 +551,23 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def _add_get(self, admin_id: int):
         csrf = self._csrf(admin_id)
+        q = parse_qs(urlparse(self.path).query)
+        err = q.get("err", [None])[0]
+        links_err = q.get("links_err", [None])[0] or ""
+        flash = err if err and not links_err else None
         body = f"""
         <div class="card">
           <h1>Add drama</h1>
           <p class="muted">Creates Season 1 and posts the channel card (same as /add).</p>
-          <form method="post" action="/admin/add" enctype="multipart/form-data">
+          <form method="post" action="/admin/add" enctype="multipart/form-data" id="add-drama-form">
             {csrf}
             <label>Title</label><input name="title" required>
             <div class="row">
               <div><label>Year</label><input name="year" inputmode="numeric" placeholder="2026"></div>
               <div><label>Status</label>
                 <select name="status"><option>Ongoing</option><option>Completed</option></select></div>
-              <div><label>Total episodes</label><input name="total" inputmode="numeric" placeholder="16"></div>
+              <div><label>Total episodes</label>
+                <input name="total" id="add-total" inputmode="numeric" placeholder="16"></div>
             </div>
             <div class="row">
               <div><label>Audio</label><input name="audio" placeholder="Korean, Eng Sub"></div>
@@ -574,12 +579,12 @@ class AdminHandler(BaseHTTPRequestHandler):
               <div><label>Poster URL</label><input name="poster_url" placeholder="https://…"></div>
               <div><label>Poster file</label><input type="file" name="poster_file" accept="image/*"></div>
             </div>
-            <label>Episode links (Season 1)</label>
-            <textarea name="links" rows="6" placeholder="720p: https://x/{{ep}} 1 16&#10;1080p: https://y/{{ep}} 1 16"></textarea>
+            {add_drama_links_section(err=links_err)}
             <div class="actions"><button class="btn" type="submit">Create &amp; post</button></div>
           </form>
         </div>"""
-        self._html(200, H.layout("Add drama", body, nav="add", admin_id=admin_id))
+        self._html(200, H.layout("Add drama", body, nav="add", admin_id=admin_id,
+                                 flash_msg=flash, flash_kind="err"))
 
     def _reports(self, admin_id: int):
         db = _CTX["db"]
@@ -631,37 +636,36 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     # ---------- mutations ----------
     def _add_post(self, admin_id: int, fields: dict, files: dict):
+        from urllib.parse import quote
         db, svc = _CTX["db"], _CTX["svc"]
-        from utils import parse_quality_links
-        title = (fields.get("title") or "").strip()
+        title = _field(fields, "title").strip()
         if not title:
-            return self._redirect("/admin/add?err=Title+required")
+            return self._redirect("/admin/add?err=" + quote("Title required"))
         kw = {
             "title": title,
-            "synopsis": (fields.get("synopsis") or "").strip(),
-            "genres": ", ".join(g.strip().title() for g in (fields.get("genres") or "").split(",") if g.strip()),
-            "status": "Completed" if (fields.get("status") or "").title() == "Completed" else "Ongoing",
-            "audio": (fields.get("audio") or "").strip() or None,
-            "imdb": (fields.get("imdb") or "").strip() or None,
+            "synopsis": _field(fields, "synopsis").strip(),
+            "genres": ", ".join(g.strip().title() for g in _field(fields, "genres").split(",") if g.strip()),
+            "status": "Completed" if _field(fields, "status").title() == "Completed" else "Ongoing",
+            "audio": _field(fields, "audio").strip() or None,
+            "imdb": _field(fields, "imdb").strip() or None,
         }
-        if (fields.get("year") or "").isdigit():
-            kw["year"] = int(fields["year"])
-        if (fields.get("total") or "").isdigit():
-            kw["total_episodes"] = int(fields["total"])
-        poster = (fields.get("poster_url") or "").strip() or None
+        year = _field(fields, "year").strip()
+        if year.isdigit():
+            kw["year"] = int(year)
+        total = _field(fields, "total").strip()
+        if total.isdigit():
+            kw["total_episodes"] = int(total)
+        poster = _field(fields, "poster_url").strip() or None
         if files.get("poster_file") and files["poster_file"][1]:
-            # Upload bytes via bot to get a file_id — store as temporary URL path unsupported;
-            # send as document to storage through persist if possible. Fallback: skip binary without bot.
             poster = self._upload_poster_bytes(files["poster_file"][0], files["poster_file"][1]) or poster
         if poster:
             try:
                 kw.update(run_async(svc.persist_poster(poster)))
             except Exception:
                 kw["poster"] = poster
-        try:
-            eps = parse_quality_links(fields.get("links") or "", kw.get("total_episodes"), start=1)
-        except ValueError as e:
-            return self._redirect("/admin/add?err=" + str(e))
+        eps, err = expand_quality_range(fields, _field, _field_list)
+        if err:
+            return self._redirect("/admin/add?links_err=" + quote(err))
         d = db.add_drama(**kw, episodes=eps)
         try:
             run_async(svc.post_card(d))

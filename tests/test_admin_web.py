@@ -159,16 +159,20 @@ def test_password_login_session_and_csrf(web):
     st, body, _ = web.open("/admin/add")
     csrf = web.csrf_from(body)
     # CSRF missing -> 403
-    st, body, _ = web.open("/admin/add", {"title": "X", "links": ""})
+    st, body, _ = web.open("/admin/add", {"title": "X"})
     assert st == 403 and "CSRF" in body
-    # with CSRF
+    # page uses structured qualities, not a links textarea
+    assert 'id="add-drama-form"' in web.open("/admin/add")[1]
+    assert 'name="720p"' in web.open("/admin/add")[1] and "Episode links" not in web.open("/admin/add")[1]
+    csrf = web.csrf_from(web.open("/admin/add")[1])
     st, body, _ = web.open("/admin/add", {
         "csrf": csrf, "title": "Web Drama", "year": "2026", "status": "Ongoing",
         "total": "16", "genres": "Romance", "synopsis": "hi",
-        "links": "720p: https://x/{ep} 1 2",
+        "ep_from": "1", "ep_to": "2", "720p": "https://x/{ep}",
     })
     assert st == 200 and ("Web Drama" in body or "Created" in body or "Saved" in body or "drama" in body.lower())
-    assert web.db.find_drama("Web Drama") is not None
+    d = web.db.find_drama("Web Drama")
+    assert d is not None and [e.number for e in d.episodes] == [1, 2]
 
 
 def test_add_edit_addep_newseason_complete_delete(web):
@@ -177,7 +181,7 @@ def test_add_edit_addep_newseason_complete_delete(web):
     csrf = web.csrf_from(body)
     web.open("/admin/add", {
         "csrf": csrf, "title": "Season Show", "status": "Ongoing", "total": "2",
-        "links": "720p: https://a/{ep} 1 2",
+        "ep_from": "1", "ep_to": "2", "720p": "https://a/{ep}",
     })
     d = web.db.find_drama("Season Show")
     assert d and len(d.episodes) == 2 and not d.is_multi
@@ -261,3 +265,38 @@ def test_report_resolve_via_web(web):
 def test_password_requires_admin_id(web):
     st, body, _ = web.open("/admin/login", {"mode": "password", "telegram_id": "99999", "password": "s3cret"})
     assert st == 403 and "Not an admin" in body
+
+
+def test_add_drama_structured_links(web):
+    web.login_password()
+    _, body, _ = web.open("/admin/add")
+    assert "From episode" in body and "＋ Part" in body and 'name="480p"' in body
+    csrf = web.csrf_from(body)
+    # no links → drama with 0 episodes
+    web.open("/admin/add", {"csrf": csrf, "title": "Empty Eps", "status": "Ongoing", "total": "16"})
+    d = web.db.find_drama("Empty Eps")
+    assert d and len(d.episodes) == 0 and d.total_episodes == 16
+    # bad URL
+    _, body, _ = web.open("/admin/add")
+    csrf = web.csrf_from(body)
+    st, body, _ = web.open("/admin/add", {
+        "csrf": csrf, "title": "Bad URL", "ep_from": "1", "ep_to": "2", "720p": "ftp://x/{ep}",
+    })
+    assert "http" in body.lower()
+    assert web.db.find_drama("Bad URL") is None
+    # range + parts + mirrors with {ep}
+    _, body, _ = web.open("/admin/add")
+    csrf = web.csrf_from(body)
+    web.open("/admin/add", {
+        "csrf": csrf, "title": "Range Show", "status": "Ongoing", "total": "3",
+        "ep_from": "1", "ep_to": "3",
+        "720p": ["https://a/{ep}-p1", "https://a/{ep}-p2"],
+        "720p_mirror": "https://m/{ep}",
+        "1080p": "https://b/{ep}",
+    })
+    d = web.db.find_drama("Range Show")
+    assert [e.number for e in d.episodes] == [1, 2, 3]
+    ep1 = d.episodes[0]
+    groups = dict(ep1.quality_groups())
+    assert [l.url for l in groups["720p"]] == ["https://a/1-p1", "https://a/1-p2", "https://m/1"]
+    assert groups["1080p"][0].url == "https://b/1"
