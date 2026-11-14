@@ -384,26 +384,80 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _poster(self, did: int):
+        """Stream a poster: Telegram -> client in small chunks. No image bytes are kept in memory."""
+        if not P.posters_enabled(_CTX):
+            return self._send(404, b"", "text/plain", "public, max-age=3600")
         d = P.catalog(_CTX)["by_id"].get(did)
         ref = d and d.get("poster_ref")
         if not ref:
-            return self._send(404, b"", "image/jpeg", "no-store")
+            return self._send(404, b"", "text/plain", "public, max-age=300")
+        cache = "public, max-age=604800, immutable"
         if P.is_http(ref):
             self.send_response(302); self.send_header("Location", ref)
-            self.send_header("Cache-Control", "public, max-age=3600"); self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", cache); self.send_header("Content-Length", "0")
             return self.end_headers()
-        hit = P.poster_cached(ref)
-        if not hit:
+        etag = P.poster_etag(ref)
+        inm = self.headers.get("If-None-Match") or ""
+        if etag in [t.strip() for t in inm.split(",")] or inm.strip() == "*":
+            self.send_response(304)
+            self.send_header("ETag", etag); self.send_header("Cache-Control", cache)
+            return self.end_headers()
+        import urllib.error
+        import urllib.request
+        upstream = None
+        for attempt in (1, 2):
             try:
-                data = run_async(P.fetch_poster_bytes(_CTX, ref), timeout=20)
+                url = run_async(P.resolve_file_url(_CTX, ref), timeout=20)
             except Exception as e:
-                log.info("poster %s fetch failed: %s", did, e)
-                data = None
-            if not data:
-                return self._send(404, b"", "image/jpeg", "public, max-age=300")
-            P.poster_store(ref, data)
-            hit = (data, "image/jpeg")
-        self._send(200, hit[0], hit[1], "public, max-age=604800, immutable")
+                log.info("poster %s: get_file failed (%s)", did, type(e).__name__)
+                url = None
+            if not url:
+                return self._send(404, b"", "text/plain", "public, max-age=300")
+            try:
+                upstream = urllib.request.urlopen(url, timeout=15)
+                break
+            except urllib.error.HTTPError as e:
+                P.forget_file_url(ref)  # stale download link: ask Telegram again once
+                log.info("poster %s: upstream HTTP %s", did, e.code)
+            except Exception as e:  # never log the URL (it contains the token)
+                log.info("poster %s: upstream failed (%s)", did, type(e).__name__)
+                P.forget_file_url(ref)
+                break
+        if upstream is None:
+            return self._send(502, b"", "text/plain", "no-store")
+        with upstream:
+            length = upstream.headers.get("Content-Length")
+            if length and length.isdigit() and int(length) > P.POSTER_MAX_BYTES:
+                return self._send(404, b"", "text/plain", "public, max-age=300")
+            ctype = (upstream.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if not ctype.startswith("image/"):
+                ctype = "image/jpeg"  # Telegram serves photos as octet-stream
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            if length and length.isdigit():
+                self.send_header("Content-Length", length)
+            else:
+                self.close_connection = True  # HTTP/1.0: end of body = connection close
+            self.send_header("Cache-Control", cache)
+            self.send_header("ETag", etag)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            sent = 0
+            try:
+                while True:
+                    chunk = upstream.read(P.POSTER_CHUNK)
+                    if not chunk:
+                        break
+                    sent += len(chunk)
+                    if sent > P.POSTER_MAX_BYTES:
+                        self.close_connection = True
+                        break
+                    self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+            except Exception as e:
+                log.info("poster %s: stream aborted (%s)", did, type(e).__name__)
+                self.close_connection = True
 
     # ---------- auth ----------
     def _login_get(self):

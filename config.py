@@ -57,6 +57,8 @@ class Config:
     weekly_summary_time: str = field(default_factory=lambda: os.getenv("WEEKLY_SUMMARY_TIME", "10:00"))
     admin_web_password: str = field(default_factory=lambda: os.getenv("ADMIN_WEB_PASSWORD", "").strip())
     admin_web_secret: str = field(default_factory=lambda: os.getenv("ADMIN_WEB_SECRET", "").strip())
+    # Public site posters (streamed from Telegram, never cached in RAM). 0 = letter tiles only.
+    public_posters: bool = field(default_factory=lambda: os.getenv("PUBLIC_POSTERS", "1").strip().lower() not in {"0", "false", "no", "off"})
 
     @property
     def brand_handle(self) -> str:

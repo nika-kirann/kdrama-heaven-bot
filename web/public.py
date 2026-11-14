@@ -5,6 +5,7 @@ it shows exactly what the bot shows viewers: dramas, seasons, episodes and their
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -14,20 +15,20 @@ import unicodedata
 from collections import OrderedDict, deque
 from datetime import datetime
 from difflib import SequenceMatcher
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from . import html as H
 
 log = logging.getLogger(__name__)
 ASSET_V = "1"
 CACHE_TTL = 60.0
+CATALOG_MAX = 3000       # dramas kept in the single cached snapshot (bounded memory)
+SYNOPSIS_MAX = 1500      # chars kept per synopsis
 DEFAULT_BOT = "kdrama_help_robot"
 QUALITY_ORDER = {"480p": 0, "540p": 1, "720p": 2, "HD": 3, "1080p": 4, "4K": 5, "2160p": 5}
 
 _lock = threading.Lock()
 _cache: dict = {"key": None, "at": 0.0, "data": None}
-_posters: "OrderedDict[str, tuple[bytes, str]]" = OrderedDict()
-_POSTER_MAX = 120
 _rate: dict[str, deque] = {}
 RATE_N, RATE_WINDOW = 40, 10.0  # /api/search: 40 req / 10 s / IP
 
@@ -71,34 +72,43 @@ def _to_naive(dt):
     return dt.replace(tzinfo=None) if isinstance(dt, datetime) and dt.tzinfo else dt
 
 
+def _seasons(d) -> list[dict]:
+    """Full season/episode/quality-link tree for ONE drama (built per request, never cached)."""
+    seasons = []
+    for sea in d.seasons or []:
+        eps = []
+        for e in sorted(sea.episodes, key=lambda x: x.number):
+            groups = []
+            for q, links in e.quality_groups():
+                parts = [l for l in links if (l.kind or "part") != "mirror"]
+                mirrors = [l for l in links if l.kind == "mirror"]
+                groups.append({
+                    "q": q,
+                    "parts": [{"id": l.id, "url": l.url} for l in parts],
+                    "mirrors": [{"id": l.id, "url": l.url} for l in mirrors],
+                })
+            groups.sort(key=lambda g: QUALITY_ORDER.get(g["q"], 9))
+            eps.append({"n": e.number, "id": e.id, "groups": groups})
+        seasons.append({"n": sea.number, "status": sea.status, "total": sea.total_episodes, "eps": eps})
+    return seasons
+
+
 def _build(ctx) -> dict:
+    """Card-level index only (no episode links): small enough to keep as the 60s snapshot."""
     db, cfg = ctx["db"], ctx.get("cfg")
     from services import next_air_info
     tz = getattr(cfg, "tz", None) if cfg else None
-    dramas, _ = db.list_dramas(limit=100_000, order="latest")
+    posters_on = posters_enabled(ctx)
+    dramas, _ = db.list_dramas(limit=CATALOG_MAX, order="latest")
     items = []
     for d in dramas:
-        seasons = []
         latest_at, latest_label = None, ""
         for sea in d.seasons or []:
-            eps = []
-            for e in sorted(sea.episodes, key=lambda x: x.number):
-                groups = []
-                for q, links in e.quality_groups():
-                    parts = [l for l in links if (l.kind or "part") != "mirror"]
-                    mirrors = [l for l in links if l.kind == "mirror"]
-                    groups.append({
-                        "q": q,
-                        "parts": [{"id": l.id, "url": l.url} for l in parts],
-                        "mirrors": [{"id": l.id, "url": l.url} for l in mirrors],
-                    })
-                groups.sort(key=lambda g: QUALITY_ORDER.get(g["q"], 9))
-                eps.append({"n": e.number, "id": e.id, "groups": groups})
+            for e in sea.episodes:
                 ca = _to_naive(e.created_at)
                 if ca and (latest_at is None or ca > latest_at):
                     latest_at = ca
                     latest_label = (f"S{sea.number} · EP {e.number}" if len(d.seasons) > 1 else f"EP {e.number}")
-            seasons.append({"n": sea.number, "status": sea.status, "total": sea.total_episodes, "eps": eps})
         cur = d.current
         have = len(cur.episodes) if cur else len(d.episodes)
         tot = (cur.total_episodes if cur else None) or d.total_episodes
@@ -112,14 +122,16 @@ def _build(ctx) -> dict:
             nxt = {"ep": ep, "date": f"{when:%B} {when.day}, {when.year}",
                    "time": (f"{when:%I:%M %p}".lstrip("0") + " IST") if has_time else ""}
         poster = None
-        if is_http(d.poster):
+        if not posters_on:
+            pass
+        elif is_http(d.poster):
             poster = d.poster
         elif d.poster:
             poster = f"/poster/{d.id}.jpg?v={abs(hash(d.poster)) % 10**8}"
         items.append({
             "id": d.id, "title": d.title, "year": d.year, "status": d.status, "genres": d.genre_list,
-            "synopsis": d.synopsis or "", "imdb": d.imdb, "audio": d.audio or getattr(cfg, "default_audio", ""),
-            "poster": poster, "poster_ref": d.poster, "seasons": seasons,
+            "synopsis": (d.synopsis or "")[:SYNOPSIS_MAX], "imdb": d.imdb, "audio": d.audio or getattr(cfg, "default_audio", ""),
+            "poster": poster, "poster_ref": d.poster if posters_on else None,
             "multi": len(d.seasons) > 1, "cur": cur.number if cur else 1,
             "have": have, "total": tot, "next": nxt,
             "latest_at": latest_at, "latest_label": latest_label,
@@ -128,6 +140,15 @@ def _build(ctx) -> dict:
         })
     by_id = {x["id"]: x for x in items}
     return {"items": items, "by_id": by_id, "built": time.time()}
+
+
+def detail(ctx, did: int) -> dict | None:
+    """Catalog card + its season/episode/link tree, loaded from the DB for this request only."""
+    item = catalog(ctx)["by_id"].get(did)
+    if not item:
+        return None
+    d = ctx["db"].get_drama(did)
+    return {**item, "seasons": _seasons(d) if d else []}
 
 
 def catalog(ctx) -> dict:
@@ -476,8 +497,7 @@ def ep_panel(d, sea, ep, bot: str, open_: bool) -> str:
 
 
 def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None, host: str = "") -> str | None:
-    cat = catalog(ctx)
-    d = cat["by_id"].get(did)
+    d = detail(ctx, did)
     if not d:
         return None
     bot = bot_name(ctx)
@@ -575,12 +595,16 @@ def not_found(ctx, host: str = "") -> str:
 # ---------------------------------------------------------------- link + poster delivery
 def resolve_link(ctx, link_ref: str) -> tuple[str | None, dict | None]:
     """'/go/<link_id>' -> (target_url, click_info). Non-http targets go to the bot deep link."""
-    cat = catalog(ctx)
     bot = bot_name(ctx)
     if not link_ref.isdigit():
         return None, None
     lid = int(link_ref)
-    for d in cat["items"]:
+    from db import EpisodeLink, Episode
+    with ctx["db"].session() as ses:
+        row = ses.get(EpisodeLink, lid)
+        did = ses.get(Episode, row.episode_id).drama_id if row else None
+    d = detail(ctx, did) if did else None
+    for d in [d] if d else []:
         for s in d["seasons"]:
             for x in s["eps"]:
                 for g in x["groups"]:
@@ -601,31 +625,71 @@ def favicon_svg() -> bytes:
             '<path d="M32 12l4.4 13.1L49 29l-12.6 4.4L32 47l-4.4-13.6L15 29l12.6-3.9Z" fill="#fff"/></svg>').encode()
 
 
-def poster_cached(key: str):
+# Posters are STREAMED, never held in memory: only file_id -> Telegram download URL is remembered
+# (bounded, short TTL), and the image bytes flow upstream -> client in small chunks.
+POSTER_CHUNK = 32 * 1024            # bytes per read/write
+POSTER_MAX_BYTES = 8 * 1024 * 1024  # refuse anything bigger than a sane poster
+_PATH_TTL = 30 * 60.0               # Telegram download links live >= 1 h
+_PATH_MAX = 200
+_paths: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
+
+
+def posters_enabled(ctx) -> bool:
+    cfg = ctx.get("cfg")
+    return bool(getattr(cfg, "public_posters", True)) if cfg is not None else True
+
+
+def poster_etag(ref: str) -> str:
+    return '"p-' + hashlib.sha1(str(ref).encode()).hexdigest()[:20] + '"'
+
+
+def _bot(ctx):
+    return ctx.get("bot") or getattr(ctx.get("svc"), "bot", None)
+
+
+def cached_file_url(file_id: str) -> str | None:
+    now = time.monotonic()
     with _lock:
-        v = _posters.get(key)
-        if v:
-            _posters.move_to_end(key)
-        return v
+        v = _paths.get(file_id)
+        if v and v[1] > now:
+            _paths.move_to_end(file_id)
+            return v[0]
+        _paths.pop(file_id, None)
+    return None
 
 
-def poster_store(key: str, data: bytes, ctype: str = "image/jpeg"):
+def remember_file_url(file_id: str, url: str) -> None:
     with _lock:
-        _posters[key] = (data, ctype)
-        while len(_posters) > _POSTER_MAX:
-            _posters.popitem(last=False)
+        _paths[file_id] = (url, time.monotonic() + _PATH_TTL)
+        _paths.move_to_end(file_id)
+        while len(_paths) > _PATH_MAX:
+            _paths.popitem(last=False)
 
 
-async def fetch_poster_bytes(ctx, file_id: str) -> bytes | None:
-    """Telegram file_id -> bytes, downloaded server-side (the bot token never reaches the browser)."""
-    svc, bot = ctx.get("svc"), ctx.get("bot")
-    storage = getattr(svc, "storage", None)
-    if storage is not None and hasattr(storage, "poster_bytes"):
-        return await storage.poster_bytes(file_id)
+def forget_file_url(file_id: str) -> None:
+    with _lock:
+        _paths.pop(file_id, None)
+
+
+async def resolve_file_url(ctx, file_id: str) -> str | None:
+    """Telegram file_id -> server-side download URL (contains the bot token: never send it to a client
+    and never log it)."""
+    url = cached_file_url(file_id)
+    if url:
+        return url
+    bot = _bot(ctx)
     if bot is None:
         return None
     f = await bot.get_file(file_id)
-    return bytes(await f.download_as_bytearray())
+    fp = getattr(f, "file_path", None)
+    if not fp:
+        return None
+    if not is_http(fp):
+        fp = f"{getattr(bot, 'base_file_url', '').rstrip('/')}/{fp.lstrip('/')}"
+    sp = urlsplit(fp)
+    url = urlunsplit((sp.scheme, sp.netloc, quote(sp.path), sp.query, ""))
+    remember_file_url(file_id, url)
+    return url
 
 
 def json_bytes(obj) -> bytes:

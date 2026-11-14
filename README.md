@@ -35,6 +35,7 @@ An all-in-one Telegram bot for running the **kdrama_heaven** channel: drama card
 | `STORAGE_CHANNEL_ID` | `CHANNEL_ID` | private channel holding the DB backup + posters |
 | `STORAGE_FLUSH_DELAY` | `3` | seconds of quiet before a backup upload |
 | `POSTER_CACHE_DIR` | (off) | optional local poster cache, e.g. `/tmp/posters` |
+| `PUBLIC_POSTERS` | `1` | `0` turns posters off on the public website: letter tiles only, and `/poster/<id>.jpg` returns 404 |
 
 ## Commands
 **Admins (in a DM with the bot):**
@@ -102,7 +103,11 @@ The same web process (same `PORT`) serves a read-only catalog for viewers: `/` (
 `/search?q=` (+ live suggestions from `/api/search`, rate-limited per IP), and `/drama/<id>` (seasons, episode grid,
 480p/720p/1080p buttons with Part/Mirror). Quality buttons go through `/go/<link_id>`, which logs a click like the bot does and
 redirects to the stored URL. Anything that isn't an http(s) URL opens the bot instead (`?start=drama_<id>`). Telegram file_id posters are
-served from `/poster/<id>.jpg`, downloaded server-side so the token never reaches the browser. The catalog is cached in memory for 60 s and refreshed on admin edits.
+served from `/poster/<id>.jpg`. They are **streamed** from Telegram to the browser in 32 KB chunks and never stored in RAM or on disk, and the
+token never reaches the browser. The only thing remembered is a small file_id → file path map (at most 200 entries, 30 min TTL).
+Responses carry `Cache-Control: public, max-age=604800, immutable` and an ETag, so browsers fetch each poster once.
+Set `PUBLIC_POSTERS=0` to turn posters off completely (letter tiles only). The catalog index is cached for 60 s (capped at 3000 dramas,
+card fields only, about 0.5 MB per 300 dramas) and refreshed on admin edits. Episode links are read from the DB per drama page and never cached.
 Uptime pingers and health checks should use `/healthz` (JSON); `/` is now the homepage.
 
 ## Tests

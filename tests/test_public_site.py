@@ -18,9 +18,9 @@ def raw(web, path):
     op = urllib.request.build_opener(NoRedirect)
     try:
         with op.open(web.base + path, timeout=5) as r:
-            return r.status, dict(r.headers), r.read().decode()
+            return r.status, dict(r.headers), r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers), e.read().decode()
+        return e.code, dict(e.headers), e.read().decode("utf-8", "replace")
 
 
 def seed(db):
@@ -149,3 +149,130 @@ def test_output_is_escaped_and_no_admin_data(web):
     assert "</script>" not in api and json.loads(api)["results"][0]["title"] == evil
     st, hdrs, _ = raw(web, "/static/public.css?v=1")
     assert st == 200 and "max-age" in hdrs["Cache-Control"]
+
+
+# ---------------- posters: streamed, never cached in RAM ----------------
+import threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+
+FAKE_TOKEN_PATH = "/file/bot123456:SECRETTOKEN/photos/file_7.jpg"
+IMG = b"\xff\xd8\xff" + bytes(range(256)) * 800  # ~200 KB "jpeg"
+
+
+@pytest.fixture
+def tg_files():
+    hits = {"n": 0, "fail": 0}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            hits["n"] += 1
+            if hits["fail"]:
+                hits["fail"] -= 1
+                self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers(); return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(IMG)))
+            self.end_headers()
+            self.wfile.write(IMG)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    hits["url"] = f"http://127.0.0.1:{srv.server_address[1]}{FAKE_TOKEN_PATH}"
+    yield hits
+    srv.shutdown()
+
+
+def _wire_get_file(web, tg_files):
+    calls = []
+
+    async def get_file(file_id):
+        calls.append(file_id)
+
+        class F:
+            file_path = tg_files["url"]
+        return F()
+    web.bot.get_file = get_file
+    return calls
+
+
+def test_poster_streamed_with_cache_headers_and_no_token(web, tg_files):
+    P._paths.clear()
+    calls = _wire_get_file(web, tg_files)
+    d = web.db.add_drama(title="Poster Show", status="Ongoing", poster="AgACfileid123")
+    P.invalidate()
+    body = raw(web, f"/drama/{d.id}")[2]
+    src = re.search(r'src="(/poster/%d\.jpg\?v=\d+)"' % d.id, body).group(1)
+    op = urllib.request.build_opener(NoRedirect)
+    with op.open(web.base + src, timeout=5) as r:
+        data, hdrs = r.read(), dict(r.headers)
+    assert data == IMG and hdrs["Content-Type"] == "image/jpeg"
+    assert hdrs["Cache-Control"] == "public, max-age=604800, immutable" and hdrs["ETag"].startswith('"p-')
+    assert "SECRETTOKEN" not in json.dumps(hdrs) and "SECRETTOKEN" not in body
+    # repeat view with ETag -> 304, Telegram not contacted again
+    req = urllib.request.Request(web.base + src, headers={"If-None-Match": hdrs["ETag"]})
+    try:
+        op.open(req, timeout=5)
+        assert False, "expected 304"
+    except urllib.error.HTTPError as e:
+        assert e.code == 304 and e.headers["ETag"] == hdrs["ETag"]
+    assert tg_files["n"] == 1
+    # second full fetch reuses the small file_id -> path map (one get_file call total)
+    raw(web, src)
+    assert calls == ["AgACfileid123"] and tg_files["n"] == 2
+    # stale Telegram link -> asks get_file again once
+    tg_files["fail"] = 1
+    st, _, _ = raw(web, src)
+    assert st == 200 and len(calls) == 2
+    # nothing image-sized is kept in memory
+    assert not hasattr(P, "_posters")
+    assert all(isinstance(v[0], str) for v in P._paths.values())
+
+
+def test_file_path_map_is_bounded():
+    P._paths.clear()
+    for i in range(P._PATH_MAX + 50):
+        P.remember_file_url(f"f{i}", f"https://x/{i}")
+    assert len(P._paths) == P._PATH_MAX and "f0" not in P._paths and P.cached_file_url(f"f{P._PATH_MAX + 49}")
+    P._paths.clear()
+
+
+def test_public_posters_off_uses_letter_tiles(web, tg_files):
+    calls = _wire_get_file(web, tg_files)
+    d = web.db.add_drama(title="Tiles Only", status="Ongoing", poster="AgACfileid999")
+    h = web.db.add_drama(title="Http Poster", status="Ongoing", poster="https://img.example/p.jpg")
+    web.cfg.public_posters = False
+    P.invalidate()
+    try:
+        for path in ("/", f"/drama/{d.id}", f"/drama/{h.id}"):
+            body = raw(web, path)[2]
+            assert "<img" not in body.split("<main")[1] and "pst-ph" in body
+            assert "/poster/" not in body and "img.example" not in body
+        assert raw(web, f"/poster/{d.id}.jpg")[0] == 404
+        assert json.loads(raw(web, "/api/search?q=tiles")[2])["results"][0]["poster"] is None
+        assert calls == [] and tg_files["n"] == 0
+    finally:
+        web.cfg.public_posters = True
+        P.invalidate()
+
+
+def test_catalog_snapshot_is_bounded(web, monkeypatch):
+    for i in range(5):
+        web.db.add_drama(title=f"Bounded {i}", status="Ongoing", synopsis="x" * 5000)
+    monkeypatch.setattr(P, "CATALOG_MAX", 3)
+    P.invalidate()
+    cat = P.catalog({"db": web.db, "cfg": web.cfg})
+    assert len(cat["items"]) == 3 and all(len(x["synopsis"]) <= P.SYNOPSIS_MAX for x in cat["items"])
+    # the cached snapshot is card-level only: episode links are loaded per drama page, never cached
+    assert all("seasons" not in x for x in cat["items"])
+    P.invalidate()
+
+
+def test_public_posters_env_flag(monkeypatch):
+    from config import Config
+    monkeypatch.setenv("PUBLIC_POSTERS", "0")
+    assert Config().public_posters is False
+    monkeypatch.delenv("PUBLIC_POSTERS")
+    assert Config().public_posters is True
