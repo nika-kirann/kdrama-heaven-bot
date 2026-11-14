@@ -66,7 +66,7 @@ def test_search_api_and_page(web):
     j = json.loads(body)
     assert st == 200 and hdrs["Content-Type"].startswith("application/json")
     assert [r["title"] for r in j["results"]] == ["Squid Game"]
-    assert set(j["results"][0]) == {"id", "title", "year", "status", "poster", "url", "eps"}
+    assert set(j["results"][0]) == {"id", "title", "year", "status", "poster", "url", "eps", "h", "i"}
     assert json.loads(raw(web, "/api/search?q=LOVELY")[2])["results"][0]["title"] == "Lovely Runner"
     assert json.loads(raw(web, "/api/search?q=squd%20game")[2])["results"][0]["title"] == "Squid Game"  # typo
     assert json.loads(raw(web, "/api/search?q=")[2])["results"] == []
@@ -198,7 +198,16 @@ def _wire_get_file(web, tg_files):
     return calls
 
 
-def test_poster_streamed_with_cache_headers_and_no_token(web, tg_files):
+@pytest.fixture
+def posters_on(web):
+    web.cfg.public_posters = True
+    P.invalidate()
+    yield
+    web.cfg.public_posters = False
+    P.invalidate()
+
+
+def test_poster_streamed_with_cache_headers_and_no_token(web, tg_files, posters_on):
     P._paths.clear()
     calls = _wire_get_file(web, tg_files)
     d = web.db.add_drama(title="Poster Show", status="Ongoing", poster="AgACfileid123")
@@ -239,23 +248,42 @@ def test_file_path_map_is_bounded():
     P._paths.clear()
 
 
-def test_public_posters_off_uses_letter_tiles(web, tg_files):
+def test_posters_off_by_default_uses_title_tiles(web, tg_files):
+    assert web.cfg.public_posters is False          # default: no posters on the public site
     calls = _wire_get_file(web, tg_files)
     d = web.db.add_drama(title="Tiles Only", status="Ongoing", poster="AgACfileid999")
     h = web.db.add_drama(title="Http Poster", status="Ongoing", poster="https://img.example/p.jpg")
-    web.cfg.public_posters = False
     P.invalidate()
-    try:
-        for path in ("/", f"/drama/{d.id}", f"/drama/{h.id}"):
-            body = raw(web, path)[2]
-            assert "<img" not in body.split("<main")[1] and "pst-ph" in body
-            assert "/poster/" not in body and "img.example" not in body
-        assert raw(web, f"/poster/{d.id}.jpg")[0] == 404
-        assert json.loads(raw(web, "/api/search?q=tiles")[2])["results"][0]["poster"] is None
-        assert calls == [] and tg_files["n"] == 0
-    finally:
-        web.cfg.public_posters = True
-        P.invalidate()
+    for path in ("/", f"/drama/{d.id}", f"/drama/{h.id}"):
+        body = raw(web, path)[2]
+        main = body.split("<main")[1]
+        assert "<img" not in main and "background-image" not in main
+        assert "/poster/" not in body and "img.example" not in body
+        # polished tile: per-drama hue, big initial, title on the tile; gradient backdrop
+        assert re.search(r'class="pst[^"]*" style="--h:\d+"><span class="pst-ph" aria-hidden="true">[A-Z]</span>'
+                         r'<span class="pst-t">', main)
+        assert ('class="hero-bg ph" style="--h:' in main) or ('class="dbg ph" style="--h:' in main)
+    assert '<span class="pst-t">Tiles Only</span>' in raw(web, f"/drama/{d.id}")[2]
+    assert raw(web, f"/poster/{d.id}.jpg")[0] == 404
+    r = json.loads(raw(web, "/api/search?q=tiles")[2])["results"][0]
+    assert r["poster"] is None and r["i"] == "T" and 252 <= r["h"] < 322
+    assert calls == [] and tg_files["n"] == 0
+
+
+def test_tile_hue_is_stable_and_initial_skips_symbols():
+    a = {"id": 7, "title": "\u2018Moving\u2019"}
+    assert P.hue(a) == P.hue({"id": 7, "title": "x"}) and 252 <= P.hue(a) < 322
+    assert P.initial(a) == "M" and P.initial({"id": 1, "title": ""}) == "?"
+
+
+def test_catalog_uses_sql_aggregates_not_episode_rows(web, monkeypatch):
+    d = web.db.add_drama(title="Agg Show", status="Ongoing", total_episodes=16,
+                         episodes={e: [("720p", f"https://x/{e}.mkv", "part")] for e in range(1, 6)})
+    monkeypatch.setattr(type(web.db), "list_dramas", lambda *a, **k: (_ for _ in ()).throw(AssertionError("ORM load")))
+    P.invalidate()
+    x = P.catalog({"db": web.db, "cfg": web.cfg})["by_id"][d.id]
+    assert (x["have"], x["total"], x["latest_label"], x["cur"], x["multi"]) == (5, 16, "EP 5", 1, False)
+    P.invalidate()
 
 
 def test_catalog_snapshot_is_bounded(web, monkeypatch):
@@ -272,7 +300,9 @@ def test_catalog_snapshot_is_bounded(web, monkeypatch):
 
 def test_public_posters_env_flag(monkeypatch):
     from config import Config
+    monkeypatch.delenv("PUBLIC_POSTERS", raising=False)
+    assert Config().public_posters is False         # off unless explicitly enabled
+    monkeypatch.setenv("PUBLIC_POSTERS", "1")
+    assert Config().public_posters is True
     monkeypatch.setenv("PUBLIC_POSTERS", "0")
     assert Config().public_posters is False
-    monkeypatch.delenv("PUBLIC_POSTERS")
-    assert Config().public_posters is True

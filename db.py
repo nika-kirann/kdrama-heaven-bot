@@ -542,6 +542,52 @@ class Database:
             out.setdefault(did, []).append((snum or 1, n))
         return out
 
+    def catalog_cards(self, limit: int = 3000, synopsis_max: int = 1500) -> list[dict]:
+        """Lightweight rows for the public catalog: drama columns + per-season episode aggregates.
+        No ORM objects, no episode/link rows: COUNT/MAX are computed in SQL."""
+        alive = Drama.deleted.is_(False)
+        with self.session() as s:
+            drows = s.execute(
+                select(Drama.id, Drama.title, Drama.poster, func.substr(Drama.synopsis, 1, synopsis_max),
+                       Drama.genres, Drama.year, Drama.status, Drama.total_episodes, Drama.audio, Drama.imdb,
+                       Drama.air_time, Drama.next_ep_date, Drama.updated_at)
+                .where(alive).order_by(Drama.updated_at.desc()).limit(limit)).all()
+            ids = [r[0] for r in drows]
+            if not ids:
+                return []
+            ep_agg = (select(Episode.season_id.label("sid"), func.count(Episode.id).label("n"),
+                             func.max(Episode.number).label("mx"))
+                      .group_by(Episode.season_id).subquery())
+            srows = s.execute(
+                select(Season.drama_id, Season.number, Season.status, Season.total_episodes, ep_agg.c.n, ep_agg.c.mx)
+                .join(Drama, Drama.id == Season.drama_id).outerjoin(ep_agg, ep_agg.c.sid == Season.id)
+                .where(alive).order_by(Season.drama_id, Season.number)).all()
+            # drama-level episode count/max (used when a drama has no season rows)
+            drows_eps = dict((did, (n, mx)) for did, n, mx in s.execute(
+                select(Episode.drama_id, func.count(Episode.id), func.max(Episode.number))
+                .join(Drama, Drama.id == Episode.drama_id).where(alive).group_by(Episode.drama_id)).all())
+            # newest episode (inside a season) per drama, via a window function
+            rn = func.row_number().over(partition_by=Episode.drama_id,
+                                        order_by=(Episode.created_at.desc(), Episode.id.desc())).label("rn")
+            inner = (select(Episode.drama_id.label("did"), Episode.number.label("ep"), Season.number.label("sn"),
+                            Episode.created_at.label("at"), rn)
+                     .join(Season, Season.id == Episode.season_id).join(Drama, Drama.id == Episode.drama_id)
+                     .where(alive).subquery())
+            latest = {did: (at, sn, ep) for did, ep, sn, at in s.execute(
+                select(inner.c.did, inner.c.ep, inner.c.sn, inner.c.at).where(inner.c.rn == 1)).all()}
+        seasons: dict[int, list[dict]] = {}
+        for did, num, st, tot, n, mx in srows:
+            seasons.setdefault(did, []).append({"n": num, "status": st, "total": tot, "eps": n or 0, "max": mx or 0})
+        out = []
+        for (did, title, poster, syn, genres, year, status, total, audio, imdb, air_time, nxt, upd) in drows:
+            n, mx = drows_eps.get(did, (0, 0))
+            out.append({"id": did, "title": title, "poster": poster, "synopsis": syn or "", "genres": genres or "",
+                        "year": year, "status": status, "total_episodes": total, "audio": audio, "imdb": imdb,
+                        "air_time": air_time, "next_ep_date": nxt, "updated_at": upd,
+                        "seasons": seasons.get(did, []), "episodes": n or 0, "max_ep": mx or 0,
+                        "latest": latest.get(did)})
+        return out
+
     def stats(self, since: datetime) -> dict:
         with self.session() as s:
             alive = Drama.deleted.is_(False)

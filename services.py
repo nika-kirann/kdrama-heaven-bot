@@ -119,14 +119,22 @@ def next_air_info(d: Drama, tz=None, now=None):
     if d.status == "Completed" or tz is None:
         return None
     _, eps, total = _current_eps(d)
-    ep = max((e.number for e in eps), default=0) + 1
+    return next_air_from(d.status, max((e.number for e in eps), default=0), total,
+                         getattr(d, "air_time", None), getattr(d, "next_ep_date", None), tz, now)
+
+
+def next_air_from(status, max_ep: int, total, air_time, next_ep_date, tz=None, now=None):
+    """Same as next_air_info but from plain values (used by the public catalog's SQL aggregates)."""
+    if status == "Completed" or tz is None:
+        return None
+    ep = (max_ep or 0) + 1
     if total and ep > total:
         return None
     from datetime import date as _date, datetime as _dt
     now = (now or _dt.now(tz)).astimezone(tz)
-    tm = getattr(d, "air_time", None)
+    tm = air_time
     hh, mm = (int(x) for x in (tm or "00:00").split(":"))
-    nd = getattr(d, "next_ep_date", None)
+    nd = next_ep_date
     if nd:
         try:
             day = _date.fromisoformat(nd)

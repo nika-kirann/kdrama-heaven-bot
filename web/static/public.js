@@ -29,7 +29,7 @@
       if (!res.length) { box.innerHTML = '<div class="sug-empty">No matches for “' + esc(q) + '”</div>'; box.hidden = false; return; }
       box.innerHTML = res.map((r, i) =>
         '<a class="sug" role="option" href="' + esc(r.url) + '" data-i="' + i + '">' +
-          '<div class="pst"><span class="pst-ph">' + esc((r.title || '?')[0].toUpperCase()) + '</span>' +
+          '<div class="pst" style="--h:' + (+r.h || 270) + '"><span class="pst-ph">' + esc(r.i || (r.title || '?')[0].toUpperCase()) + '</span>' +
           (r.poster ? '<img src="' + esc(r.poster) + '" alt="" loading="lazy" onerror="this.remove()">' : '') + '</div>' +
           '<div><b>' + hl(r.title, q) + '</b><small>' + esc([r.year, r.eps].filter(Boolean).join(' · ')) + '</small></div>' +
           '<span class="spill ' + (r.status === 'Completed' ? 'done' : 'live') + '"><i></i>' + esc(r.status) + '</span></a>'

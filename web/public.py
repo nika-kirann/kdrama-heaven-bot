@@ -20,7 +20,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from . import html as H
 
 log = logging.getLogger(__name__)
-ASSET_V = "1"
+ASSET_V = "6"
 CACHE_TTL = 60.0
 CATALOG_MAX = 3000       # dramas kept in the single cached snapshot (bounded memory)
 SYNOPSIS_MAX = 1500      # chars kept per synopsis
@@ -94,49 +94,53 @@ def _seasons(d) -> list[dict]:
 
 
 def _build(ctx) -> dict:
-    """Card-level index only (no episode links): small enough to keep as the 60s snapshot."""
+    """Card-level index only (no episode links): small enough to keep as the 60s snapshot.
+    Built from plain SQL rows + COUNT/MAX aggregates; no ORM episode or link rows are loaded."""
     db, cfg = ctx["db"], ctx.get("cfg")
-    from services import next_air_info
+    from services import next_air_from
     tz = getattr(cfg, "tz", None) if cfg else None
     posters_on = posters_enabled(ctx)
-    dramas, _ = db.list_dramas(limit=CATALOG_MAX, order="latest")
     items = []
-    for d in dramas:
+    for d in db.catalog_cards(limit=CATALOG_MAX, synopsis_max=SYNOPSIS_MAX):
+        seas = d["seasons"]
+        multi = len(seas) > 1
         latest_at, latest_label = None, ""
-        for sea in d.seasons or []:
-            for e in sea.episodes:
-                ca = _to_naive(e.created_at)
-                if ca and (latest_at is None or ca > latest_at):
-                    latest_at = ca
-                    latest_label = (f"S{sea.number} · EP {e.number}" if len(d.seasons) > 1 else f"EP {e.number}")
-        cur = d.current
-        have = len(cur.episodes) if cur else len(d.episodes)
-        tot = (cur.total_episodes if cur else None) or d.total_episodes
+        if d["latest"]:
+            at, sn, ep = d["latest"]
+            latest_at = _to_naive(at)
+            latest_label = f"S{sn} · EP {ep}" if multi else f"EP {ep}"
+        cur = (max([x for x in seas if x["status"] == "Ongoing"] or seas, key=lambda x: x["n"]) if seas else None)
+        have = cur["eps"] if cur else d["episodes"]
+        tot = (cur["total"] if cur else None) or d["total_episodes"]
         nxt = None
         try:
-            info = next_air_info(d, tz) if tz else None
+            info = (next_air_from(d["status"], cur["max"] if cur else d["max_ep"],
+                                  cur["total"] if cur else d["total_episodes"],
+                                  d["air_time"], d["next_ep_date"], tz) if tz else None)
         except Exception:
             info = None
         if info:
             ep, when, has_time = info
             nxt = {"ep": ep, "date": f"{when:%B} {when.day}, {when.year}",
                    "time": (f"{when:%I:%M %p}".lstrip("0") + " IST") if has_time else ""}
+        ref = d["poster"]
         poster = None
         if not posters_on:
             pass
-        elif is_http(d.poster):
-            poster = d.poster
-        elif d.poster:
-            poster = f"/poster/{d.id}.jpg?v={abs(hash(d.poster)) % 10**8}"
+        elif is_http(ref):
+            poster = ref
+        elif ref:
+            poster = f"/poster/{d['id']}.jpg?v={abs(hash(ref)) % 10**8}"
         items.append({
-            "id": d.id, "title": d.title, "year": d.year, "status": d.status, "genres": d.genre_list,
-            "synopsis": (d.synopsis or "")[:SYNOPSIS_MAX], "imdb": d.imdb, "audio": d.audio or getattr(cfg, "default_audio", ""),
-            "poster": poster, "poster_ref": d.poster if posters_on else None,
-            "multi": len(d.seasons) > 1, "cur": cur.number if cur else 1,
+            "id": d["id"], "title": d["title"], "year": d["year"], "status": d["status"],
+            "genres": [g.strip() for g in d["genres"].split(",") if g.strip()],
+            "synopsis": d["synopsis"][:SYNOPSIS_MAX], "imdb": d["imdb"],
+            "audio": d["audio"] or getattr(cfg, "default_audio", ""),
+            "poster": poster, "poster_ref": ref if posters_on else None,
+            "multi": multi, "cur": cur["n"] if cur else 1,
             "have": have, "total": tot, "next": nxt,
             "latest_at": latest_at, "latest_label": latest_label,
-            "updated": _to_naive(d.updated_at), "n": norm(d.title),
-            "alt": [norm(a) for a in getattr(d, "alt_titles", None) or []],
+            "updated": _to_naive(d["updated_at"]), "n": norm(d["title"]), "alt": [],
         })
     by_id = {x["id"]: x for x in items}
     return {"items": items, "by_id": by_id, "built": time.time()}
@@ -234,14 +238,28 @@ def status_pill(status: str) -> str:
     return f'<span class="spill {cls}"><i></i>{e(status)}</span>'
 
 
+def hue(d) -> int:
+    """Stable per-drama hue in the purple -> magenta band (no images needed)."""
+    h = int(hashlib.md5(str(d["id"]).encode()).hexdigest()[:4], 16)
+    return 252 + h % 70
+
+
+def initial(d) -> str:
+    t = (d["title"] or "?").strip()
+    m = re.search(r"\w", t)
+    return (m.group(0) if m else t[:1] or "?").upper()
+
+
 def poster_img(d, cls: str = "", eager: bool = False) -> str:
-    letter = e((d["title"] or "?").strip()[:1].upper())
+    letter = e(initial(d))
     img = ""
     if d["poster"]:
         img = (f'<img src="{e(d["poster"])}" alt="{e(d["title"])} poster" '
                f'{"" if eager else "loading=" + chr(34) + "lazy" + chr(34) + " "}decoding="async" '
                f'onerror="this.remove()">')
-    return f'<div class="pst {cls}"><span class="pst-ph">{letter}</span>{img}</div>'
+    tile = (f'<span class="pst-ph" aria-hidden="true">{letter}</span>'
+            f'<span class="pst-t">{e(d["title"])}</span>')
+    return f'<div class="pst {cls}" style="--h:{hue(d)}">{tile}{img}</div>'
 
 
 def drama_url(d) -> str:
@@ -373,7 +391,7 @@ def home(ctx, status: str = "", host: str = "") -> str:
         meta = "".join(f'<span class="hmeta-i">{x}</span>' for x in [
             e(str(d["year"])) if d["year"] else "", f'{ic("star")}{e(d["imdb"])}' if d["imdb"] else "",
             e(progress(d))] if x) + nxt
-        bg = f'<div class="hero-bg" style="background-image:url({css_url(d["poster"])})"></div>' if d["poster"] else '<div class="hero-bg ph"></div>'
+        bg = f'<div class="hero-bg" style="background-image:url({css_url(d["poster"])})"></div>' if d["poster"] else f'<div class="hero-bg ph" style="--h:{hue(d)}"><span>{e(initial(d))}</span></div>'
         slides.append(f"""
         <article class="slide{' on' if i == 0 else ''}" data-slide="{i}">
           {bg}<div class="hero-shade"></div>
@@ -453,7 +471,7 @@ def api_search(ctx, q: str) -> dict:
     res = search(cat, q, limit=8) if q else []
     return {"q": q, "results": [{
         "id": d["id"], "title": d["title"], "year": d["year"], "status": d["status"],
-        "poster": d["poster"], "url": drama_url(d), "eps": progress(d)} for d in res]}
+        "poster": d["poster"], "url": drama_url(d), "eps": progress(d), "h": hue(d), "i": initial(d)} for d in res]}
 
 
 def link_href(l: dict, d: dict, bot: str) -> str:
@@ -542,7 +560,7 @@ def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None,
         nxt = (f'<div class="next">{ic("cal")}<div><span>Next episode · EP {d["next"]["ep"]}</span>'
                f'<b>{e(d["next"]["date"])}</b>{"<small>" + e(d["next"]["time"]) + "</small>" if d["next"]["time"] else ""}</div></div>')
     bg = (f'<div class="dbg" style="background-image:url({css_url(d["poster"])})"></div>' if d["poster"]
-          else '<div class="dbg ph"></div>')
+          else f'<div class="dbg ph" style="--h:{hue(d)}"><span>{e(initial(d))}</span></div>')
     first = eps[0] if eps else None
     body = f"""
     <section class="dhero">{bg}<div class="dshade"></div>
@@ -636,7 +654,7 @@ _paths: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
 
 def posters_enabled(ctx) -> bool:
     cfg = ctx.get("cfg")
-    return bool(getattr(cfg, "public_posters", True)) if cfg is not None else True
+    return bool(getattr(cfg, "public_posters", False)) if cfg is not None else False
 
 
 def poster_etag(ref: str) -> str:
