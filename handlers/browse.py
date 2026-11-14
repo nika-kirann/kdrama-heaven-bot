@@ -308,11 +308,15 @@ async def on_text(update: Update, context):
     if awaiting in ("report_ep", "report_note"):
         from . import report
         return await report.on_text(update, context, awaiting)
+    if awaiting == "request_reply":
+        from . import admin
+        return await admin.got_request_reply(update, context, text)
     if awaiting == "request":
         u = update.effective_user
         r = db.add_request(u.id, u.username, text[:500])
         who = f"@{u.username}" if u.username else h(u.full_name)
-        await svc.notify_admins(f"🙋 <b>Drama request #{r.id}</b> from {who} (<code>{u.id}</code>):\n{h(text[:500])}")
+        await svc.notify_admins(f"🙋 <b>Drama request #{r.id}</b> from {who} (<code>{u.id}</code>):\n{h(text[:500])}",
+                                markup=kb.request_reply(r.id))
         return await update.message.reply_text("💜 Thanks! Your request was sent to the admins.")
     # default: treat any text in DM as a search
     await show_search(update.message.reply_text, context, text, 0)

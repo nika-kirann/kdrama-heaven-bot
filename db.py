@@ -144,6 +144,19 @@ class Request(Base):
     username: Mapped[str | None] = mapped_column(String(100))
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    status: Mapped[str | None] = mapped_column(String(20), default="open")  # open|replied|closed
+    reply_text: Mapped[str | None] = mapped_column(Text)        # latest admin reply
+    replied_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class RequestReply(Base):
+    """Every admin reply DMed to a requester (history)."""
+    __tablename__ = "request_replies"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[int] = mapped_column(Integer, index=True)
+    admin_id: Mapped[int | None] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class User(Base):
@@ -227,7 +240,9 @@ class Database:
             with self.engine.begin() as c:
                 c.execute(text("ALTER TABLE episodes ADD COLUMN season_id INTEGER REFERENCES seasons(id)"))
         # reports.season / clicks.season (harmless if already present via create_all on fresh DB)
-        for table, col, typ in (("reports", "season", "INTEGER"), ("clicks", "season", "INTEGER")):
+        for table, col, typ in (("reports", "season", "INTEGER"), ("clicks", "season", "INTEGER"),
+                                ("requests", "status", "VARCHAR(20) DEFAULT 'open'"),
+                                ("requests", "reply_text", "TEXT"), ("requests", "replied_at", "TIMESTAMP")):
             try:
                 tcols = {c["name"] for c in inspect(self.engine).get_columns(table)}
             except Exception:
@@ -601,9 +616,54 @@ class Database:
             s.commit()
             return r
 
-    def list_requests(self, limit: int = 50) -> list[Request]:
+    def list_requests(self, limit: int = 50, status: str | None = None) -> list[Request]:
+        """status: None = all, 'open' = not closed (open or replied), or an exact status."""
         with self.session() as s:
-            return list(s.scalars(select(Request).order_by(Request.id.desc()).limit(limit)))
+            q = select(Request).order_by(Request.id.desc()).limit(limit)
+            if status == "open":
+                q = q.where(or_(Request.status.is_(None), Request.status != "closed"))
+            elif status:
+                q = q.where(Request.status == status)
+            return list(s.scalars(q))
+
+    def get_request(self, request_id: int) -> Request | None:
+        with self.session() as s:
+            return s.get(Request, request_id)
+
+    def add_request_reply(self, request_id: int, text: str, admin_id: int | None = None,
+                          close: bool = True) -> Request | None:
+        """Record a reply that was delivered; sets latest reply/time and status replied|closed."""
+        with self.session() as s:
+            r = s.get(Request, request_id)
+            if not r:
+                return None
+            now = utcnow()
+            s.add(RequestReply(request_id=request_id, admin_id=admin_id, text=text, created_at=now))
+            r.reply_text, r.replied_at = text, now
+            r.status = "closed" if close else "replied"
+            s.commit()
+            s.refresh(r)
+            return r
+
+    def set_request_status(self, request_id: int, status: str) -> Request | None:
+        with self.session() as s:
+            r = s.get(Request, request_id)
+            if r:
+                r.status = status
+                s.commit()
+                s.refresh(r)
+            return r
+
+    def request_replies(self, request_ids) -> dict[int, list[RequestReply]]:
+        ids = list(request_ids)
+        out: dict[int, list[RequestReply]] = {i: [] for i in ids}
+        if not ids:
+            return out
+        with self.session() as s:
+            for rr in s.scalars(select(RequestReply).where(RequestReply.request_id.in_(ids))
+                                .order_by(RequestReply.id)):
+                out.setdefault(rr.request_id, []).append(rr)
+        return out
 
     # ---- users / follows / clicks ------------------------------------
     def touch_user(self, user_id: int, username: str | None = None, started: bool = False) -> bool:

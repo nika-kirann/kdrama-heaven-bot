@@ -21,6 +21,16 @@
       window.location.href = tr.getAttribute('data-href');
     });
   });
+  // request replies: quick-reply chips fill the textarea
+  document.querySelectorAll('.reply-form').forEach(form => {
+    const ta = form.querySelector('textarea');
+    form.querySelectorAll('.chip.quick').forEach(c => c.addEventListener('click', () => {
+      ta.value = c.dataset.fill; ta.focus();
+    }));
+  });
+  document.querySelectorAll('.reply-box').forEach(box => box.addEventListener('toggle', () => {
+    if (box.open) { const ta = box.querySelector('textarea'); if (ta) ta.focus(); }
+  }));
   // open the edit panel if a hash points inside it
   if (location.hash === '#edit') {
     const d = document.querySelector('details.collapsible'); if (d) d.open = true;

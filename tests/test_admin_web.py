@@ -23,8 +23,12 @@ class FakeBot:
     def __init__(self):
         self.sent = []
         self.username = "kdrama_heaven_bot"
+        self.blocked = set()
 
     async def send_message(self, chat_id, text, **kw):
+        if chat_id in self.blocked:
+            from telegram.error import Forbidden
+            raise Forbidden("Forbidden: bot was blocked by the user")
         self.sent.append({"chat_id": chat_id, "text": text, **kw})
         return {"message_id": len(self.sent)}
 
@@ -343,7 +347,7 @@ def test_add_drama_expands_ep_over_multipart(web):
 def test_redesigned_shell_keeps_contract(web):
     """New sidebar UI: cache-busted assets, nav, empty states; link inputs stay type=text."""
     st, body, _ = web.open("/admin/login")
-    assert "admin.css?v=3" in body and "admin.js?v=3" in body and "Dashboard" not in body
+    assert "admin.css?v=4" in body and "admin.js?v=4" in body and "Dashboard" not in body
     web.login_password()
     _, body, _ = web.open("/admin")
     assert 'id="sidebar"' in body and 'id="menu-btn"' in body and 'aria-current="page"' in body
@@ -353,3 +357,47 @@ def test_redesigned_shell_keeps_contract(web):
     assert 'id="ep-expand-preview"' in body and 'type="url"' not in body
     st, body, _ = web.open("/admin/does-not-exist")
     assert st == 404 and "Page not found" in body
+
+
+def test_request_reply_via_web(web):
+    web.login_password()
+    r = web.db.add_request(4242, "fan", "Please add Reply 1988")
+    _, body, _ = web.open("/admin/requests")
+    assert "Please add Reply 1988" in body and 'action="/admin/request/reply"' in body
+    assert "Added! Check the channel" in body and 'name="close" value="1" checked' in body
+    csrf = web.csrf_from(body)
+    st, body, _ = web.open("/admin/request/reply", {"csrf": csrf, "request_id": str(r.id),
+                                                    "text": "Added! Check the channel 🎉", "close": "1",
+                                                    "view": "all"})
+    assert st == 200 and "Reply sent to @fan" in body
+    dm = [m for m in web.bot.sent if m.get("chat_id") == 4242][-1]
+    assert dm["text"] == '💬 Reply to your request "Please add Reply 1988":\n\nAdded! Check the channel 🎉'
+    r2 = web.db.get_request(r.id)
+    assert r2.status == "closed" and r2.reply_text.startswith("Added!") and r2.replied_at is not None
+    assert "Replied" in body and "Closed" in body and "reply-history" in body
+    # reply again without closing keeps history
+    csrf = web.csrf_from(body)
+    web.open("/admin/request/reply", {"csrf": csrf, "request_id": str(r.id), "text": "Season 2 too!"})
+    assert web.db.get_request(r.id).status == "replied"
+    assert [x.text for x in web.db.request_replies([r.id])[r.id]] == ["Added! Check the channel 🎉", "Season 2 too!"]
+    # open list hides closed only; replied stays open
+    _, body, _ = web.open("/admin/requests?status=open")
+    assert "Please add Reply 1988" in body
+
+
+def test_request_reply_web_failed_dm(web):
+    web.login_password()
+    r = web.db.add_request(5151, None, "Weak Hero")
+    web.bot.blocked.add(5151)
+    _, body, _ = web.open("/admin/requests")
+    csrf = web.csrf_from(body)
+    st, body, _ = web.open("/admin/request/reply", {"csrf": csrf, "request_id": str(r.id),
+                                                    "text": "Coming soon, stay tuned", "close": "1"})
+    assert st == 200 and "blocked the bot" in body and "flash toast err" in body
+    r2 = web.db.get_request(r.id)
+    assert r2.status == "open" and r2.reply_text is None and r2.replied_at is None
+    assert web.db.request_replies([r.id])[r.id] == []
+    # empty text is rejected without sending
+    csrf = web.csrf_from(body)
+    st, body, _ = web.open("/admin/request/reply", {"csrf": csrf, "request_id": str(r.id), "text": "  "})
+    assert "empty" in body.lower()

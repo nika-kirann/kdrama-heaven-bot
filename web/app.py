@@ -264,6 +264,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             "/admin/drama/complete": lambda: self._complete_post(admin, fields),
             "/admin/drama/delete": lambda: self._delete_post(admin, fields),
             "/admin/report/resolve": lambda: self._report_resolve(admin, fields),
+            "/admin/request/reply": lambda: self._request_reply_post(admin, fields),
         }
         if path in handlers:
             return handlers[path]()
@@ -771,23 +772,101 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def _requests(self, admin_id: int):
         db = _CTX["db"]
-        rows = db.list_requests()
+        from services import REQUEST_QUICK_REPLIES
+        q = parse_qs(urlparse(self.path).query)
+        view = (q.get("status", ["open"])[0] or "open").lower()
+        if view not in {"open", "closed", "all"}:
+            view = "open"
+        open_id = (q.get("open", [""])[0] or "").strip()
+        rows = db.list_requests(limit=100, status=None if view == "all" else view)
+        n_open = len(db.list_requests(limit=1000, status="open"))
+        history = db.request_replies(r.id for r in rows)
+        csrf = self._csrf(admin_id)
 
         def when(v):
             return v.strftime("%d %b %Y, %H:%M UTC") if hasattr(v, "strftime") else (v or "")
-        items = "".join(
-            f"<tr><td class='muted'>#{r.id}</td><td><div class='cell-title'>"
-            f"<div class='avatar sm'>{H.e(((r.username or str(r.user_id)) or '?')[:1].upper())}</div>"
-            f"<span>{H.e('@'+r.username if r.username else r.user_id)}</span></div></td>"
-            f"<td>{H.e(r.text)}</td><td class='muted sm nowrap'>{H.e(when(r.created_at))}</td></tr>"
-            for r in rows
-        )
-        table = (f"<div class='table-wrap'><table class='table'><thead><tr><th>#</th><th>From</th><th>Text</th>"
-                 f"<th>When</th></tr></thead><tbody>{items}</tbody></table></div>" if items else
-                 H.empty_state("inbox", "No requests yet", "Requests from viewers will show up here."))
-        body = f"""{H.page_head(f'Drama requests <span class="count">{len(rows)}</span>', "What viewers asked the bot to add.")}
-          <div class="card">{table}</div>"""
-        self._html(200, H.layout("Requests", body, nav="requests", admin_id=admin_id))
+
+        chips_q = "".join(
+            f'<button type="button" class="chip quick" data-fill="{H.e(t)}">{H.e(t)}</button>'
+            for t in REQUEST_QUICK_REPLIES)
+        cards = []
+        for r in rows:
+            who = f"@{r.username}" if r.username else str(r.user_id)
+            st = r.status or "open"
+            reps = history.get(r.id, [])
+            pills = ""
+            if reps:
+                pills += H.pill(f"Replied{' ×' + str(len(reps)) if len(reps) > 1 else ''}", "ok", dot=True)
+            if st == "closed":
+                pills += H.pill("Closed", "neutral")
+            elif not reps:
+                pills += H.pill("Open", "warn", dot=True)
+            hist = ""
+            if reps:
+                items = "".join(
+                    f"<li><div class='rh-meta'>{H.icon('send')}<b>Admin {H.e(rr.admin_id or '')}</b>"
+                    f"<span class='muted sm'>{H.e(when(rr.created_at))}</span></div>"
+                    f"<div class='rh-text'>{H.e(rr.text)}</div></li>" for rr in reps)
+                hist = f"<ul class='reply-history'>{items}</ul>"
+            is_open = open_id == str(r.id)
+            cards.append(f"""
+            <div class="card req{' closed' if st == 'closed' else ''}" id="req-{r.id}">
+              <div class="req-top">
+                <div class="cell-title"><div class="avatar sm">{H.e(who[:2].lstrip('@')[:1].upper() or '?')}</div>
+                  <div><b>{H.e(who)}</b> <span class="report-id">#{r.id}</span>
+                  <div class="muted sm">{H.icon('clock')} {H.e(when(r.created_at))} · id <span class="mono">{r.user_id}</span></div></div></div>
+                <div class="pills">{pills}</div>
+              </div>
+              <blockquote class="req-text">{H.e(r.text)}</blockquote>
+              {hist}
+              <details class="reply-box"{' open' if is_open else ''}>
+                <summary class="btn secondary btn-sm">{H.icon('send')}{'Reply again' if reps else 'Reply'}</summary>
+                <form method="post" action="/admin/request/reply" class="reply-form">{csrf}
+                  <input type="hidden" name="request_id" value="{r.id}">
+                  <input type="hidden" name="view" value="{H.e(view)}">
+                  <label>Reply to {H.e(who)}</label>
+                  <div class="chips quick-chips">{chips_q}</div>
+                  <textarea name="text" rows="3" required maxlength="3500" placeholder="Write a reply… it's sent as a Telegram DM from the bot"></textarea>
+                  <div class="reply-foot">
+                    <label class="check"><input type="checkbox" name="close" value="1" checked><span>Mark as done / closed</span></label>
+                    <button class="btn btn-sm" type="submit">{H.icon('send')}Send reply</button>
+                  </div>
+                </form>
+              </details>
+            </div>""")
+
+        def chip(val, label):
+            return f'<a class="chip{" on" if view == val else ""}" href="/admin/requests?status={val}">{label}</a>'
+        chips = chip("open", f"Open · {n_open}") + chip("closed", "Closed") + chip("all", "All")
+        listing = (f"<div class='req-list'>{''.join(cards)}</div>" if cards else
+                   f"<div class='card'>{H.empty_state('inbox', 'No requests here', 'Requests from viewers will show up here.' if view != 'closed' else 'Nothing closed yet.')}</div>")
+        body = f"""{H.page_head(f'Drama requests <span class="count">{n_open}</span>',
+                                "What viewers asked the bot to add. Reply and they get a Telegram DM from the bot.")}
+          <div class="chips">{chips}</div>
+          {listing}"""
+        flash = q.get("ok", [None])[0] or q.get("err", [None])[0]
+        self._html(200, H.layout("Requests", body, nav="requests", admin_id=admin_id,
+                                 flash_msg=flash, flash_kind="ok" if "ok" in q else "err"))
+
+    def _request_reply_post(self, admin_id: int, fields: dict):
+        from urllib.parse import quote
+        from services import reply_to_request
+        rid_s = _field(fields, "request_id").strip()
+        view = _field(fields, "view", "open")
+        view = view if view in {"open", "closed", "all"} else "open"
+        if not rid_s.isdigit():
+            return self._redirect(f"/admin/requests?status={view}&err=" + quote("Bad request id"))
+        rid = int(rid_s)
+        close = _field(fields, "close") in {"1", "on", "true", "yes"}
+        try:
+            ok, msg = run_async(reply_to_request(_CTX.get("bot"), _CTX["db"], rid, _field(fields, "text"),
+                                                 admin_id=admin_id, close=close))
+        except Exception as e:  # never 500 on a send problem
+            log.warning("request reply failed: %s", e)
+            ok, msg = False, f"Couldn't send the reply: {e}"
+        if ok:
+            return self._redirect(f"/admin/requests?status={view}&ok=" + quote(msg) + f"#req-{rid}")
+        self._redirect(f"/admin/requests?status={view}&open={rid}&err=" + quote(msg) + f"#req-{rid}")
 
     # ---------- mutations ----------
     def _add_post(self, admin_id: int, fields: dict, files: dict):

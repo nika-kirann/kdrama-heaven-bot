@@ -18,6 +18,7 @@
   rr:<drama_id>:<m|w|b|o>            report reason;  rsk:<ep|note|sea> skip
   rs:<drama_id>:<season>             report: pick a season
   rpf:<report_id> / rpd:<report_id>  admin: mark fixed / dismiss
+  rqr:<request_id>                   admin: reply to a drama request
   delok:<drama_id>:<season> / delno  admin: confirm season delete
 """
 from math import ceil
@@ -235,3 +236,8 @@ def links_keyboard(drama, number: int, qidx: int, page: int = 0, season: int | N
     back = (f"ep:{drama.id}:{sn}:{number}:{page}" if multi else f"ep:{drama.id}:{number}:{page}")
     rows.append([B("↩️ Qualities", callback_data=back)])
     return M(rows)
+
+
+def request_reply(request_id: int) -> M:
+    """Admin-side button under a new drama request."""
+    return M([[B("💬 Reply", callback_data=f"rqr:{request_id}")]])

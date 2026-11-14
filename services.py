@@ -25,6 +25,51 @@ def badge(status: str) -> str:
 
 
 
+REQUEST_QUICK_REPLIES = ("Added! Check the channel 🎉", "Coming soon, stay tuned", "Sorry, not available right now")
+
+
+def request_reply_text(request_text: str, reply: str) -> str:
+    """Exact DM a requester receives (plain text, no parse mode)."""
+    req = " ".join((request_text or "").split())
+    if len(req) > 120:
+        req = req[:117] + "…"
+    return f'💬 Reply to your request "{req}":\n\n{reply.strip()}'
+
+
+async def reply_to_request(bot, db, request_id: int, text: str, *, admin_id: int | None = None,
+                           close: bool = True) -> tuple[bool, str]:
+    """DM the requester and, only if delivered, record the reply on the request.
+    Returns (ok, message). Shared by the web panel and the Telegram admin commands."""
+    text = (text or "").strip()
+    if not text:
+        return False, "Reply text is empty."
+    if len(text) > 3500:
+        return False, "Reply is too long (max 3500 characters)."
+    r = db.get_request(request_id)
+    if not r:
+        return False, f"Request #{request_id} not found."
+    who = f"@{r.username}" if r.username else str(r.user_id)
+    if bot is None:
+        return False, "Bot is not connected, so the DM could not be sent."
+    try:
+        await safe_call(bot.send_message, chat_id=r.user_id, text=request_reply_text(r.text, text),
+                        disable_web_page_preview=True)
+    except Forbidden:
+        try:
+            db.mark_blocked(r.user_id)
+        except Exception:
+            log.warning("mark_blocked failed", exc_info=True)
+        return False, f"Couldn't DM {who}: they blocked the bot. Request #{r.id} was not marked replied."
+    except BadRequest as e:
+        log.info("Request reply to %s failed: %s", r.user_id, e)
+        return False, f"Couldn't DM {who}: {e}. Request #{r.id} was not marked replied."
+    except TelegramError as e:
+        log.warning("Request reply to %s failed: %s", r.user_id, e)
+        return False, f"Couldn't DM {who} ({e}). Request #{r.id} was not marked replied."
+    db.add_request_reply(r.id, text, admin_id=admin_id, close=close)
+    return True, f"Reply sent to {who}" + (" · request closed" if close else "")
+
+
 def qualities(d: Drama) -> list[str]:
     out = []
     for e in d.episodes:
@@ -366,6 +411,10 @@ class ChannelService:
             log.exception("Scheduled post %s failed", sid)
             self.db.set_schedule_status(sid, "failed")
             raise
+
+    async def reply_to_request(self, request_id: int, text: str, *, admin_id: int | None = None,
+                               close: bool = True) -> tuple[bool, str]:
+        return await reply_to_request(self.bot, self.db, request_id, text, admin_id=admin_id, close=close)
 
     async def notify_admins(self, text: str, markup=None):
         for aid in self.cfg.admin_ids:

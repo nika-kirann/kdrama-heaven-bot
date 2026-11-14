@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import html as _h
 
-ASSET_V = "3"
+ASSET_V = "4"
 
 _FONT = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
          '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'

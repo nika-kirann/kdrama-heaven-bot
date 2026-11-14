@@ -1,7 +1,7 @@
 """Admin commands: /complete /edit /delete /list /stats /schedule /schedules /cleanup."""
 import logging
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import jobs
@@ -261,8 +261,89 @@ async def poster_photo(update: Update, context):
 
 
 async def cancel_poster(update: Update, context):
+    """/cancel outside the wizards: aborts a pending poster change or request reply."""
     if context.user_data.pop("awaiting_poster", None):
-        await update.message.reply_text("Cancelled the poster change.")
+        return await update.message.reply_text("Cancelled the poster change.")
+    rid = context.user_data.pop("reply_request_id", None)
+    if context.user_data.get("awaiting") == "request_reply":
+        context.user_data.pop("awaiting", None)
+    if rid:
+        await update.message.reply_text(f"Cancelled the reply to request #{rid}.")
+
+
+def _request_summary(r) -> str:
+    who = f"@{r.username}" if r.username else str(r.user_id)
+    return f"#{r.id} from {h(who)} (<code>{r.user_id}</code>):\n<i>{h(r.text[:300])}</i>"
+
+
+async def _ask_request_reply(msg, context, r):
+    context.user_data["awaiting"] = "request_reply"
+    context.user_data["reply_request_id"] = r.id
+    await msg.reply_text(f"💬 Replying to request {_request_summary(r)}\n\n"
+                         "Send your reply text now, or /cancel.", parse_mode="HTML")
+
+
+async def _send_request_reply(msg, context, request_id: int, text: str, admin_id: int):
+    _, svc, _ = deps(context)
+    ok, note = await svc.reply_to_request(request_id, text, admin_id=admin_id, close=True)
+    await msg.reply_text(("✅ " if ok else "⚠️ ") + note)
+    return ok
+
+
+async def request_reply_button(update: Update, context):
+    """💬 Reply under a request notification / in /requests."""
+    q = update.callback_query
+    if not is_admin(update, context):
+        from .common import NOT_ALLOWED
+        return await q.answer(NOT_ALLOWED, show_alert=True)
+    db, _, _ = deps(context)
+    r = db.get_request(int(q.data.split(":")[1]))
+    if not r:
+        return await q.answer("That request no longer exists.", show_alert=True)
+    await q.answer()
+    await _ask_request_reply(q.message, context, r)
+
+
+async def got_request_reply(update: Update, context, text: str):
+    """Text sent after tapping 💬 Reply or `/reply <id>` (called from browse.on_text)."""
+    rid = context.user_data.pop("reply_request_id", None)
+    if not is_admin(update, context) or not rid:
+        return
+    await _send_request_reply(update.message, context, rid, text, update.effective_user.id)
+
+
+@admin_only
+async def reply_cmd(update: Update, context):
+    """/reply <request_id> <text>  — or /reply <request_id> to be asked for the text."""
+    db, _, _ = deps(context)
+    raw = arg_text(update)
+    parts = raw.split(maxsplit=1)
+    if not parts or not parts[0].lstrip("#").isdigit():
+        return await update.message.reply_text("Usage: /reply <request_id> <text>\nSee /requests for ids.")
+    rid = int(parts[0].lstrip("#"))
+    r = db.get_request(rid)
+    if not r:
+        return await update.message.reply_text(f"Request #{rid} not found.")
+    if len(parts) == 1:
+        return await _ask_request_reply(update.message, context, r)
+    await _send_request_reply(update.message, context, rid, parts[1], update.effective_user.id)
+
+
+@admin_only
+async def requests_cmd(update: Update, context):
+    """/requests — latest open drama requests with 💬 Reply buttons."""
+    db, _, _ = deps(context)
+    rows = db.list_requests(limit=10, status="open")
+    if not rows:
+        return await update.message.reply_text("🙋 No open drama requests. ✦")
+    lines = [f"🙋 <b>Open drama requests</b> ({len(rows)})\n"]
+    buttons = []
+    for r in rows:
+        tag = " · 💬 replied" if r.status == "replied" else ""
+        lines.append(_request_summary(r) + tag)
+        buttons.append([InlineKeyboardButton(f"💬 Reply #{r.id}", callback_data=f"rqr:{r.id}")])
+    await update.message.reply_text("\n\n".join(lines), parse_mode="HTML",
+                                    reply_markup=InlineKeyboardMarkup(buttons))
 
 
 @admin_only
@@ -412,6 +493,7 @@ async def admin_help(update: Update, context):
         "/edit &lt;id&gt; &lt;field&gt; &lt;value&gt;  (also: /edit &lt;id&gt; sN total 16)\n"
         "/delete &lt;drama&gt; [sN]\n/list\n/stats\n/reports — open viewer reports\n"
         "/schedule &lt;drama|-&gt; YYYY-MM-DD HH:MM &lt;text&gt;\n/schedules, /unschedule &lt;id&gt;\n"
+        "/requests — open drama requests\n/reply &lt;request_id&gt; &lt;text&gt; — DM a requester\n"
         "/cleanup\n/digest — post today's digest now\n/cancel", parse_mode="HTML")
 
 
@@ -425,5 +507,7 @@ def handlers():
         CommandHandler("schedules", schedules), CommandHandler("unschedule", unschedule),
         CommandHandler("cleanup", cleanup), CommandHandler("digest", digest_now),
         CommandHandler("admin", admin_help), CommandHandler("cancel", cancel_poster),
+        CommandHandler("reply", reply_cmd), CommandHandler("requests", requests_cmd),
+        CallbackQueryHandler(request_reply_button, pattern=r"^rqr:\d+$"),
         MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE), poster_photo),
     ]
