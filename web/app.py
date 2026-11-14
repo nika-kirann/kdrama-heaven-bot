@@ -240,7 +240,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/admin/drama/(\d+)", path)
         if m:
             return self._drama_detail(admin, int(m.group(1)))
-        self._html(404, H.layout("Not found", "<div class='card'><h1>404</h1></div>", admin_id=admin))
+        self._html(404, H.layout("Not found", H.empty_state("info", "404 — Page not found", "That page doesn't exist.", "<a class='btn secondary' href='/admin'>Go to dashboard</a>"), admin_id=admin))
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -253,8 +253,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         if not admin:
             return self._need_login()
         if not self._csrf_ok(admin, fields):
-            return self._html(403, H.layout("CSRF", "<div class='card'><h1>Invalid CSRF token</h1>"
-                                            "<p><a href='/admin'>Back</a></p></div>",
+            return self._html(403, H.layout("CSRF", H.empty_state("shield", "Invalid CSRF token", "Your session form expired. Go back and try again.",
+                                                           "<a class='btn secondary' href='/admin'>Back</a>"),
                                             admin_id=admin, flash_msg="CSRF failed — try again.", flash_kind="err"))
         handlers = {
             "/admin/add": lambda: self._add_post(admin, fields, files),
@@ -267,7 +267,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         }
         if path in handlers:
             return handlers[path]()
-        self._html(404, H.layout("Not found", "<div class='card'><h1>404</h1></div>", admin_id=admin))
+        self._html(404, H.layout("Not found", H.empty_state("info", "404 — Page not found", "That page doesn't exist.", "<a class='btn secondary' href='/admin'>Go to dashboard</a>"), admin_id=admin))
 
     # ---------- public ----------
     def _health(self, head_only=False):
@@ -375,35 +375,94 @@ class AdminHandler(BaseHTTPRequestHandler):
         db, svc = _CTX["db"], _CTX["svc"]
         from utils import local_midnight_utc
         s = db.stats(local_midnight_utc(_CTX["cfg"].tz))
-        open_r = db.open_reports(0)[0]
+        open_n, open_rows = db.open_reports(5)
+        recent, _ = db.list_dramas(limit=6, order="latest")
+        stats = "".join([
+            H.stat_card("Dramas", s['dramas'], "film", "purple"),
+            H.stat_card("Ongoing", s['ongoing'], "play", "violet"),
+            H.stat_card("Completed", s['completed'], "check-circle", "green"),
+            H.stat_card("Seasons", s.get('seasons', 0), "layers", "blue"),
+            H.stat_card("Episodes", s['episodes'], "tv", "pink"),
+            H.stat_card("Open reports", open_n, "flag", "red" if open_n else "slate"),
+            H.stat_card("Requests", s['requests'], "inbox", "gold"),
+            H.stat_card("Posts today", s['posts_today'], "send", "cyan"),
+        ])
+        recent_rows = "".join(
+            f"<tr data-href='/admin/drama/{d.id}'><td><div class='cell-title'>{self._thumb(d)}"
+            f"<div><a href='/admin/drama/{d.id}'><b>{H.e(d.title)}</b></a>"
+            f"<div class='muted sm'>#{d.id}{' · ' + str(d.year) if d.year else ''}</div></div></div></td>"
+            f"<td>{H.status_badge(d.status)}</td><td class='num'>{H.e(self._eps_text(d))}</td></tr>"
+            for d in recent
+        )
+        recent_html = (
+            f"<div class='table-wrap'><table class='table'><thead><tr><th>Title</th><th>Status</th>"
+            f"<th>Episodes</th></tr></thead><tbody>{recent_rows}</tbody></table></div>"
+            if recent else H.empty_state("film", "No dramas yet", "Add your first drama to get started.",
+                                         f"<a class='btn' href='/admin/add'>{H.icon('plus')}Add drama</a>")
+        )
+        rep_items = []
+        for r in open_rows:
+            d = db.get_drama(r.drama_id)
+            rep_items.append(
+                f"<li><span class='li-ic'>{H.icon('flag')}</span><div><b>{H.e(d.title if d else '#'+str(r.drama_id))}</b>"
+                f"<div class='muted sm'>{H.e(self._reason(r.reason))}{' · EP ' + str(r.episode) if r.episode else ''}</div></div>"
+                f"<span class='pill warn'><i class='dot'></i>Open</span></li>")
+        rep_html = (f"<ul class='mini-list'>{''.join(rep_items)}</ul>" if rep_items else
+                    H.empty_state("check-circle", "All clear", "No open reports right now."))
+        actions = (f"<a class='btn secondary' href='/admin/reports'>{H.icon('flag')}Reports</a>"
+                   f"<a class='btn' href='/admin/add'>{H.icon('plus')}Add drama</a>")
         body = f"""
-        <div class="card">
-          <h1>Dashboard</h1>
-          <p class="muted">Quick look at kdrama_heaven.</p>
-          <div class="grid">
-            <div class="stat"><div class="n">{s['dramas']}</div><div class="l">Dramas</div></div>
-            <div class="stat"><div class="n">{s['ongoing']}</div><div class="l">Ongoing</div></div>
-            <div class="stat"><div class="n">{s['completed']}</div><div class="l">Completed</div></div>
-            <div class="stat"><div class="n">{s.get('seasons', 0)}</div><div class="l">Seasons</div></div>
-            <div class="stat"><div class="n">{s['episodes']}</div><div class="l">Episodes</div></div>
-            <div class="stat"><div class="n">{open_r}</div><div class="l">Open reports</div></div>
-            <div class="stat"><div class="n">{s['requests']}</div><div class="l">Requests</div></div>
-            <div class="stat"><div class="n">{s['posts_today']}</div><div class="l">Posts today</div></div>
+        {H.page_head("Dashboard", "Quick look at kdrama_heaven — your channel at a glance.", actions)}
+        <div class="stats">{stats}</div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head between"><div class="card-head-l"><div class="card-ic">{H.icon('film')}</div>
+              <div><h2>Recent dramas</h2><p class="muted">Latest additions and updates</p></div></div>
+              <a class="btn ghost btn-sm" href="/admin/dramas">View all {H.icon('chevron')}</a></div>
+            {recent_html}
           </div>
-          <div class="actions">
-            <a class="btn" href="/admin/add">＋ Add drama</a>
-            <a class="btn secondary" href="/admin/reports">⚠️ Reports</a>
-            <a class="btn secondary" href="/admin/dramas">📚 Dramas</a>
+          <div class="col">
+            <div class="card">
+              <div class="card-head between"><div class="card-head-l"><div class="card-ic red">{H.icon('flag')}</div>
+                <div><h2>Open reports</h2><p class="muted">{open_n} waiting</p></div></div>
+                <a class="btn ghost btn-sm" href="/admin/reports">Open {H.icon('chevron')}</a></div>
+              {rep_html}
+            </div>
+            <div class="card">
+              <div class="card-head"><div class="card-ic gold">{H.icon('bolt')}</div>
+                <div><h2>Live stats text</h2><p class="muted">Same as the bot's /stats</p></div></div>
+              <pre class="mono stats-pre">{H.e(svc.stats_text())}</pre>
+            </div>
           </div>
         </div>
-        <div class="card"><h2>Live stats text</h2>
-          <pre class="mono muted">{H.e(svc.stats_text())}</pre></div>
         """
         q = parse_qs(urlparse(self.path).query)
         flash = q.get("ok", [None])[0] or q.get("err", [None])[0]
         kind = "ok" if "ok" in q else "err"
         self._html(200, H.layout("Dashboard", body, nav="dashboard", admin_id=admin_id,
                                  flash_msg=flash, flash_kind=kind))
+
+    @staticmethod
+    def _reason(code: str) -> str:
+        from keyboards import REPORT_REASONS
+        return REPORT_REASONS.get(code, code)
+
+    @staticmethod
+    def _thumb(d, cls: str = "thumb") -> str:
+        if d.poster and str(d.poster).startswith("http"):
+            return f'<img class="{cls}" src="{H.e(d.poster)}" alt="" loading="lazy">'
+        letter = H.e((d.title or "?").strip()[:1].upper())
+        return f'<div class="{cls} ph">{letter}</div>'
+
+    @staticmethod
+    def _eps_text(d) -> str:
+        if d.is_multi and d.current:
+            eps = f"{len(d.seasons)} seasons · S{d.current.number} {len(d.current.episodes)}"
+            if d.current.total_episodes:
+                eps += f"/{d.current.total_episodes}"
+            return eps
+        eps = f"{len(d.episodes)}" + (f"/{d.total_episodes}" if d.total_episodes else "")
+        return eps + " eps"
 
     def _dramas(self, admin_id: int):
         db = _CTX["db"]
@@ -418,89 +477,153 @@ class AdminHandler(BaseHTTPRequestHandler):
             dramas, total = db.list_dramas(status=status, limit=100, order="latest")
         rows = []
         for d in dramas:
-            if d.is_multi and d.current:
-                eps = f"{len(d.seasons)} seasons · S{d.current.number} {len(d.current.episodes)}"
-                if d.current.total_episodes:
-                    eps += f"/{d.current.total_episodes}"
-            else:
-                eps = f"{len(d.episodes)}" + (f"/{d.total_episodes}" if d.total_episodes else "")
-                eps += " eps"
+            eps = self._eps_text(d)
+            cur = d.current
+            have = len(cur.episodes) if cur else len(d.episodes)
+            tot = (cur.total_episodes if cur else None) or d.total_episodes
+            pct = min(100, int(have * 100 / tot)) if tot else 0
+            prog = (f"<div class='prog'><i style='width:{pct}%'></i></div>" if tot else "")
+            genres = ", ".join(g.strip() for g in (d.genres or "").split(",")[:3] if g.strip())
             rows.append(
-                f"<tr><td><a href='/admin/drama/{d.id}'><b>{H.e(d.title)}</b></a>"
-                f"<div class='muted'>#{d.id}{' · ' + str(d.year) if d.year else ''}</div></td>"
-                f"<td>{H.status_badge(d.status)}</td><td>{H.e(eps)}</td></tr>"
+                f"<tr data-href='/admin/drama/{d.id}'><td><div class='cell-title'>{self._thumb(d)}"
+                f"<div><a href='/admin/drama/{d.id}'><b>{H.e(d.title)}</b></a>"
+                f"<div class='muted sm'>#{d.id}{' · ' + str(d.year) if d.year else ''}"
+                f"{' · ' + H.e(genres) if genres else ''}</div></div></div></td>"
+                f"<td>{H.status_badge(d.status)}</td><td class='num'>{H.e(eps)}{prog}</td>"
+                f"<td class='chev'>{H.icon('chevron')}</td></tr>"
             )
+
+        def chip(val, label):
+            on = (status or "") == val and not search
+            href = "/admin/dramas" + (f"?status={val}" if val else "")
+            return f'<a class="chip{" on" if on else ""}" href="{href}">{label}</a>'
+        chips = chip("", "All") + chip("Ongoing", "Ongoing") + chip("Completed", "Completed")
+        if rows:
+            table = (f"<div class='table-wrap'><table class='table'><thead><tr><th>Title</th><th>Status</th>"
+                     f"<th>Episodes</th><th></th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>")
+        else:
+            table = H.empty_state("film", "No dramas yet" if not search else "No matches",
+                                  "Try a different search or filter." if search or status else
+                                  "Add your first drama to get started.",
+                                  f"<a class='btn' href='/admin/add'>{H.icon('plus')}Add drama</a>")
         body = f"""
+        {H.page_head(f'Dramas <span class="count">{total}</span>', "Browse, search and manage every drama in the channel.",
+                     f"<a class='btn' href='/admin/add'>{H.icon('plus')}Add drama</a>")}
         <div class="card">
-          <h1>Dramas <span class="muted">({total})</span></h1>
-          <form method="get" action="/admin/dramas" class="row">
-            <div><label>Search</label><input name="q" value="{H.e(search)}" placeholder="title, genre, year"></div>
-            <div><label>Status</label>
-              <select name="status">
-                <option value="">All</option>
-                <option value="Ongoing" {"selected" if status=="Ongoing" else ""}>Ongoing</option>
-                <option value="Completed" {"selected" if status=="Completed" else ""}>Completed</option>
-              </select>
-            </div>
-            <div><button class="btn" type="submit">Filter</button></div>
+          <form method="get" action="/admin/dramas" class="toolbar">
+            <div class="input-ic grow">{H.icon('search')}<input name="q" value="{H.e(search)}" placeholder="Search title, genre, year" aria-label="Search"></div>
+            <select name="status" aria-label="Status">
+              <option value="">All statuses</option>
+              <option value="Ongoing" {"selected" if status=="Ongoing" else ""}>Ongoing</option>
+              <option value="Completed" {"selected" if status=="Completed" else ""}>Completed</option>
+            </select>
+            <button class="btn" type="submit">Filter</button>
           </form>
-          <table class="table"><thead><tr><th>Title</th><th>Status</th><th>Episodes</th></tr></thead>
-          <tbody>{''.join(rows) or "<tr><td colspan=3 class='muted'>No dramas yet.</td></tr>"}</tbody></table>
+          <div class="chips">{chips}</div>
+          {table}
         </div>"""
-        self._html(200, H.layout("Dramas", body, nav="dramas", admin_id=admin_id))
+        qq = parse_qs(urlparse(self.path).query)
+        flash = qq.get("ok", [None])[0] or qq.get("err", [None])[0]
+        self._html(200, H.layout("Dramas", body, nav="dramas", admin_id=admin_id,
+                                 flash_msg=flash, flash_kind="ok" if "ok" in qq else "err"))
 
     def _drama_detail(self, admin_id: int, drama_id: int):
         db = _CTX["db"]
         d = db.get_drama(drama_id)
         if not d or d.deleted:
-            return self._html(404, H.layout("Missing", "<div class='card'><h1>Drama not found</h1></div>",
-                                            admin_id=admin_id))
+            return self._html(404, H.layout("Missing", H.empty_state(
+                "film", "Drama not found", "It may have been deleted.",
+                f"<a class='btn secondary' href='/admin/dramas'>{H.icon('arrow-left')}Back to dramas</a>"),
+                nav="dramas", admin_id=admin_id))
         csrf = self._csrf(admin_id)
         q = parse_qs(urlparse(self.path).query)
         form_err = q.get("addep_err", [None])[0] or ""
         seasons_html = ""
         for sea in d.seasons:
-            heading = (f"{'✅' if sea.status=='Completed' else '🔄'} Season {sea.number}"
-                       if d.is_multi else f"{'✅' if sea.status=='Completed' else '🔄'} Episodes")
+            heading = f"Season {sea.number}" if d.is_multi else "Episodes"
             eps_rows = "".join(
-                f"<tr><td>EP {e.number}</td><td class='mono'>{H.e(', '.join(qq for qq,_ in e.quality_groups()))}</td>"
-                f"<td>{e.link_count} links</td></tr>" for e in sea.episodes
-            ) or "<tr><td colspan=3 class='muted'>No episodes yet</td></tr>"
+                f"<tr><td><span class='ep-n'>EP {e.number}</span></td>"
+                f"<td><div class='pills'>{''.join(H.quality_pill(qq) for qq,_ in e.quality_groups())}</div></td>"
+                f"<td class='num muted'>{e.link_count} links</td></tr>" for e in sea.episodes
+            )
+            table = (f"<div class='table-wrap'><table class='table compact'><thead><tr><th>Ep</th><th>Quality</th>"
+                     f"<th>Links</th></tr></thead><tbody>{eps_rows}</tbody></table></div>" if eps_rows else
+                     H.empty_state("tv", "No episodes yet", "Use the Add episode form above."))
+            del_season = ("<form method='post' action='/admin/drama/delete'>" + csrf +
+                          f"<input type='hidden' name='drama_id' value='{d.id}'><input type='hidden' name='season' value='{sea.number}'>"
+                          f"<button class='btn danger-ghost btn-sm' data-confirm='Delete Season {sea.number}? This cannot be undone.' type='submit'>{H.icon('trash')}Delete season</button></form>"
+                          if d.is_multi else "")
             seasons_html += f"""
             <div class="card" id="season-{sea.number}">
-              <h3>{heading}
-                <span class="muted">· {len(sea.episodes)}{('/'+str(sea.total_episodes)) if sea.total_episodes else ''} eps</span>
-              </h3>
-              <table class="table"><thead><tr><th>Ep</th><th>Quality</th><th>Links</th></tr></thead>
-              <tbody>{eps_rows}</tbody></table>
-              <div class="actions">
-                <form method="post" action="/admin/drama/complete">{csrf}
-                  <input type="hidden" name="drama_id" value="{d.id}">
-                  <input type="hidden" name="season" value="{sea.number}">
-                  <button class="btn secondary" type="submit" {"disabled" if sea.status=="Completed" else ""}>Complete{" season" if d.is_multi else ""}</button>
-                </form>
-                {"<form method='post' action='/admin/drama/delete'>"+csrf+f"<input type='hidden' name='drama_id' value='{d.id}'><input type='hidden' name='season' value='{sea.number}'><button class='btn danger' data-confirm='Delete Season {sea.number}? This cannot be undone.' type='submit'>Delete season</button></form>" if d.is_multi else ""}
+              <div class="card-head between"><div class="card-head-l"><div class="card-ic">{H.icon('layers')}</div>
+                <div><h2>{heading} {H.status_badge(sea.status)}</h2>
+                <p class="muted">{len(sea.episodes)}{('/'+str(sea.total_episodes)) if sea.total_episodes else ''} eps</p></div></div>
+                <div class="actions">
+                  <form method="post" action="/admin/drama/complete">{csrf}
+                    <input type="hidden" name="drama_id" value="{d.id}">
+                    <input type="hidden" name="season" value="{sea.number}">
+                    <button class="btn secondary btn-sm" type="submit" {"disabled" if sea.status=="Completed" else ""}>{H.icon('check')}Complete{" season" if d.is_multi else ""}</button>
+                  </form>
+                  {del_season}
+                </div>
               </div>
+              {table}
             </div>"""
         add_form = add_episode_form(d, csrf, err=form_err)
 
-        poster = f'<img class="poster" src="{H.e(d.poster)}" alt="poster">' if d.poster and str(d.poster).startswith("http") else '<div class="poster"></div>'
+        poster = self._thumb(d, "poster")
+        tags = "".join(H.pill(g.strip(), "neutral") for g in (d.genres or "").split(",") if g.strip())
+        facts = []
+        if d.year:
+            facts.append(f"<span>{H.icon('calendar')}{d.year}</span>")
+        if d.imdb:
+            facts.append(f"<span>{H.icon('star')}IMDb {H.e(d.imdb)}</span>")
+        if d.audio:
+            facts.append(f"<span>{H.icon('info')}{H.e(d.audio)}</span>")
+        if d.is_multi:
+            facts.append(f"<span>{H.icon('layers')}{len(d.seasons)} seasons</span>")
+        facts.append(f"<span>{H.icon('tv')}{H.e(self._eps_text(d))}</span>")
+        if d.next_ep_date:
+            facts.append(f"<span>{H.icon('clock')}Next: {H.e(d.next_ep_date)}{' ' + H.e(d.air_time) if d.air_time else ''}</span>")
         body = f"""
-        <div class="card">
+        <a class="back-link" href="/admin/dramas">{H.icon('arrow-left')}<span>All dramas</span></a>
+        <div class="card hero">
           <div class="drama-head">
             {poster}
             <div class="meta">
+              <div class="pills">{H.status_badge(d.status)} <span class="pill neutral">#{d.id}</span></div>
               <h1>{H.e(d.title)}</h1>
-              <div>{H.status_badge(d.status)} <span class="muted">#{d.id}
-                {" · " + str(len(d.seasons)) + " seasons" if d.is_multi else ""}</span></div>
-              <p class="muted">{H.e(d.genres)}{" · " + str(d.year) if d.year else ""}{" · ⭐ " + H.e(d.imdb) if d.imdb else ""}</p>
+              <div class="facts">{''.join(facts)}</div>
+              <div class="pills">{tags}</div>
+              {"<p class='synopsis'>" + H.e(d.synopsis) + "</p>" if d.synopsis else ""}
             </div>
           </div>
-          <form method="post" action="/admin/drama/edit" enctype="multipart/form-data">
+          <div class="hero-actions">
+            <form method="post" action="/admin/drama/newseason" class="inline-form">{csrf}
+              <input type="hidden" name="drama_id" value="{d.id}">
+              <input name="total" placeholder="S{len(d.seasons)+1} total eps" inputmode="numeric" class="w-sm">
+              <button class="btn gold" type="submit">{H.icon('plus')}New season</button>
+            </form>
+            <form method="post" action="/admin/drama/complete">{csrf}
+              <input type="hidden" name="drama_id" value="{d.id}">
+              <button class="btn secondary" type="submit">{H.icon('check-circle')}Complete current season</button>
+            </form>
+            <form method="post" action="/admin/drama/delete" class="push-right">{csrf}
+              <input type="hidden" name="drama_id" value="{d.id}">
+              <button class="btn danger" data-confirm="Delete the WHOLE drama '{H.e(d.title)}'?" type="submit">{H.icon('trash')}Delete drama</button>
+            </form>
+          </div>
+        </div>
+        <details class="card collapsible">
+          <summary class="card-head"><div class="card-ic">{H.icon('save')}</div>
+            <div><h2>Edit details</h2><p class="muted">Title, status, metadata, schedule &amp; poster</p></div>
+            <span class="sum-chev">{H.icon('chevron')}</span></summary>
+          <form method="post" action="/admin/drama/edit" enctype="multipart/form-data" class="edit-form">
             {csrf}
             <input type="hidden" name="drama_id" value="{d.id}">
+            <div class="fieldset"><div class="fs-title">Basics</div>
             <div class="row">
-              <div><label>Title</label><input name="title" value="{H.e(d.title)}" required></div>
+              <div class="span-2"><label>Title</label><input name="title" value="{H.e(d.title)}" required></div>
               <div><label>Year</label><input name="year" value="{d.year or ''}" inputmode="numeric"></div>
               <div><label>Status</label>
                 <select name="status">
@@ -512,10 +635,11 @@ class AdminHandler(BaseHTTPRequestHandler):
             <div class="row">
               <div><label>Audio</label><input name="audio" value="{H.e(d.audio or '')}" placeholder="Korean, Eng Sub"></div>
               <div><label>IMDb</label><input name="imdb" value="{H.e(d.imdb or '')}" placeholder="8.6"></div>
-              <div><label>Genres / tags</label><input name="genres" value="{H.e(d.genres)}"></div>
+              <div class="span-2"><label>Genres / tags</label><input name="genres" value="{H.e(d.genres)}"></div>
             </div>
             <label>Synopsis</label>
-            <textarea name="synopsis" rows="4">{H.e(d.synopsis)}</textarea>
+            <textarea name="synopsis" rows="4">{H.e(d.synopsis)}</textarea></div>
+            <div class="fieldset"><div class="fs-title">Schedule</div>
             <div class="row">
               <div><label>Total eps (current season)</label>
                 <input name="total" value="{(d.current.total_episodes if d.current else d.total_episodes) or ''}" inputmode="numeric"></div>
@@ -523,29 +647,15 @@ class AdminHandler(BaseHTTPRequestHandler):
                 <input name="nextep" value="{H.e(d.next_ep_date or '')}" placeholder="2026-11-11"></div>
               <div><label>Air time (IST)</label>
                 <input name="air_time" value="{H.e(d.air_time or '')}" placeholder="20:00"></div>
-            </div>
+            </div></div>
+            <div class="fieldset"><div class="fs-title">Poster</div>
             <div class="row">
               <div><label>Poster URL</label><input name="poster_url" value="" placeholder="https://… or leave blank"></div>
               <div><label>Poster file</label><input type="file" name="poster_file" accept="image/*"></div>
-            </div>
-            <div class="actions"><button class="btn" type="submit">Save changes</button></div>
+            </div></div>
+            <div class="form-foot"><button class="btn" type="submit">{H.icon('save')}Save changes</button></div>
           </form>
-          <div class="actions" style="margin-top:8px">
-            <form method="post" action="/admin/drama/newseason">{csrf}
-              <input type="hidden" name="drama_id" value="{d.id}">
-              <input name="total" placeholder="S{len(d.seasons)+1} total eps" inputmode="numeric" style="width:140px">
-              <button class="btn gold" type="submit">＋ New season</button>
-            </form>
-            <form method="post" action="/admin/drama/complete">{csrf}
-              <input type="hidden" name="drama_id" value="{d.id}">
-              <button class="btn secondary" type="submit">Complete current season</button>
-            </form>
-            <form method="post" action="/admin/drama/delete">{csrf}
-              <input type="hidden" name="drama_id" value="{d.id}">
-              <button class="btn danger" data-confirm="Delete the WHOLE drama '{H.e(d.title)}'?" type="submit">Delete drama</button>
-            </form>
-          </div>
-        </div>
+        </details>
         {add_form}
         {seasons_html}
         """
@@ -561,12 +671,13 @@ class AdminHandler(BaseHTTPRequestHandler):
         links_err = q.get("links_err", [None])[0] or ""
         flash = err if err and not links_err else None
         body = f"""
-        <div class="card">
-          <h1>Add drama</h1>
-          <p class="muted">Creates Season 1 and posts the channel card (same as /add).</p>
-          <form method="post" action="/admin/add" enctype="multipart/form-data" id="add-drama-form">
-            {csrf}
-            <label>Title</label><input name="title" required>
+        {H.page_head("Add drama", "Creates Season 1 and posts the channel card (same as /add).", back="/admin/dramas")}
+        <form method="post" action="/admin/add" enctype="multipart/form-data" id="add-drama-form" class="form-grid">
+          {csrf}
+          <div class="card">
+            <div class="card-head"><div class="card-ic">{H.icon('film')}</div>
+              <div><h2>Basics</h2><p class="muted">Title, year and season status</p></div></div>
+            <label>Title</label><input name="title" required placeholder="e.g. Lovely Runner">
             <div class="row">
               <div><label>Year</label><input name="year" inputmode="numeric" placeholder="2026"></div>
               <div><label>Status</label>
@@ -574,20 +685,36 @@ class AdminHandler(BaseHTTPRequestHandler):
               <div><label>Total episodes</label>
                 <input name="total" id="add-total" inputmode="numeric" placeholder="16"></div>
             </div>
+          </div>
+          <div class="card">
+            <div class="card-head"><div class="card-ic blue">{H.icon('info')}</div>
+              <div><h2>Details</h2><p class="muted">Shown on the channel card</p></div></div>
             <div class="row">
               <div><label>Audio</label><input name="audio" placeholder="Korean, Eng Sub"></div>
               <div><label>IMDb</label><input name="imdb" placeholder="8.6"></div>
               <div><label>Genres</label><input name="genres" placeholder="Romance, Fantasy"></div>
             </div>
-            <label>Synopsis</label><textarea name="synopsis" rows="3"></textarea>
+            <label>Synopsis</label><textarea name="synopsis" rows="3" placeholder="Short plot summary…"></textarea>
+          </div>
+          <div class="card">
+            <div class="card-head"><div class="card-ic pink">{H.icon('image')}</div>
+              <div><h2>Poster</h2><p class="muted">Paste a URL or upload an image</p></div></div>
             <div class="row">
               <div><label>Poster URL</label><input name="poster_url" placeholder="https://…"></div>
               <div><label>Poster file</label><input type="file" name="poster_file" accept="image/*"></div>
             </div>
+          </div>
+          <div class="card">
+            <div class="card-head"><div class="card-ic gold">{H.icon('link')}</div>
+              <div><h2>Season 1 episodes <span class="muted">(optional)</span></h2>
+              <p class="muted">Bulk-create episodes from link templates</p></div></div>
             {add_drama_links_section(err=links_err)}
-            <div class="actions"><button class="btn" type="submit">Create &amp; post</button></div>
-          </form>
-        </div>"""
+          </div>
+          <div class="sticky-foot">
+            <span class="muted sm">The channel card is posted as soon as you create.</span>
+            <button class="btn lg" type="submit">{H.icon('send')}Create &amp; post</button>
+          </div>
+        </form>"""
         self._html(200, H.layout("Add drama", body, nav="add", admin_id=admin_id,
                                  flash_msg=flash, flash_kind="err"))
 
@@ -596,47 +723,70 @@ class AdminHandler(BaseHTTPRequestHandler):
         n, rows = db.open_reports()
         csrf = self._csrf(admin_id)
         items = []
+        tones = {"m": "warn", "w": "violet", "b": "err", "o": "neutral"}
         for r in rows:
             d = db.get_drama(r.drama_id)
             title = d.title if d else f"#{r.drama_id}"
             sea = f"S{r.season} " if r.season and d and d.is_multi else ""
             ep = f"{sea}EP {r.episode}" if r.episode else (sea.strip() or "—")
-            from keyboards import REPORT_REASONS
-            reason = REPORT_REASONS.get(r.reason, r.reason)
+            reason = self._reason(r.reason)
             who = f"@{r.username}" if r.username else str(r.user_id)
+            when = r.created_at.strftime("%d %b %Y, %H:%M UTC") if r.created_at else ""
+            link = f"<a href='/admin/drama/{d.id}'>{H.e(title)}</a>" if d else H.e(title)
             items.append(f"""
-            <div class="card">
-              <h3>#{r.id} · {H.e(title)}</h3>
-              <p><b>{H.e(ep)}</b> · {H.e(reason)} · from {H.e(who)}</p>
-              {"<p class='muted'>"+H.e(r.note)+"</p>" if r.note else ""}
+            <div class="card report">
+              <div class="report-top">
+                <div class="report-title">
+                  <span class="report-id">#{r.id}</span>
+                  <h3>{link}</h3>
+                </div>
+                <span class="pill warn"><i class="dot"></i>Open</span>
+              </div>
+              <div class="report-meta">
+                {H.pill(reason, tones.get(r.reason, "neutral"))}
+                <span class="pill neutral">{H.icon('tv')}{H.e(ep)}</span>
+                <span class="muted sm">{H.icon('user')}{H.e(who)}</span>
+                {f"<span class='muted sm'>{H.icon('clock')}{H.e(when)}</span>" if when else ""}
+              </div>
+              {"<blockquote class='note'>"+H.e(r.note)+"</blockquote>" if r.note else ""}
               <div class="actions">
                 <form method="post" action="/admin/report/resolve">{csrf}
                   <input type="hidden" name="report_id" value="{r.id}">
                   <input type="hidden" name="action" value="fixed">
-                  <button class="btn" type="submit">✅ Mark fixed</button></form>
+                  <button class="btn success btn-sm" type="submit">{H.icon('check')}Mark fixed</button></form>
                 <form method="post" action="/admin/report/resolve">{csrf}
                   <input type="hidden" name="report_id" value="{r.id}">
                   <input type="hidden" name="action" value="dismissed">
-                  <button class="btn secondary" type="submit">🗑 Dismiss</button></form>
+                  <button class="btn secondary btn-sm" type="submit">{H.icon('x')}Dismiss</button></form>
               </div>
             </div>""")
-        body = f"<div class='card'><h1>Open reports ({n})</h1></div>" + ("".join(items) or
-               "<div class='card muted'>No open reports. ✦</div>")
+        body = (H.page_head(f'Open reports <span class="count">{n}</span>',
+                            "Viewer reports about missing, wrong or broken episodes. Marking fixed DMs the reporter.")
+                + (f"<div class='report-list'>{''.join(items)}</div>" if items else
+                   f"<div class='card'>{H.empty_state('check-circle', 'No open reports', 'Everything is working. ✦')}</div>"))
         q = parse_qs(urlparse(self.path).query)
-        flash = q.get("ok", [None])[0]
-        self._html(200, H.layout("Reports", body, nav="reports", admin_id=admin_id, flash_msg=flash))
+        flash = q.get("ok", [None])[0] or q.get("err", [None])[0]
+        self._html(200, H.layout("Reports", body, nav="reports", admin_id=admin_id, flash_msg=flash,
+                                 flash_kind="ok" if "ok" in q else "err"))
 
     def _requests(self, admin_id: int):
         db = _CTX["db"]
         rows = db.list_requests()
+
+        def when(v):
+            return v.strftime("%d %b %Y, %H:%M UTC") if hasattr(v, "strftime") else (v or "")
         items = "".join(
-            f"<tr><td>#{r.id}</td><td>{H.e('@'+r.username if r.username else r.user_id)}</td>"
-            f"<td>{H.e(r.text)}</td><td class='muted'>{H.e(r.created_at)}</td></tr>"
+            f"<tr><td class='muted'>#{r.id}</td><td><div class='cell-title'>"
+            f"<div class='avatar sm'>{H.e(((r.username or str(r.user_id)) or '?')[:1].upper())}</div>"
+            f"<span>{H.e('@'+r.username if r.username else r.user_id)}</span></div></td>"
+            f"<td>{H.e(r.text)}</td><td class='muted sm nowrap'>{H.e(when(r.created_at))}</td></tr>"
             for r in rows
-        ) or "<tr><td colspan=4 class='muted'>No requests yet.</td></tr>"
-        body = f"""<div class="card"><h1>Drama requests</h1>
-          <table class="table"><thead><tr><th>#</th><th>From</th><th>Text</th><th>When</th></tr></thead>
-          <tbody>{items}</tbody></table></div>"""
+        )
+        table = (f"<div class='table-wrap'><table class='table'><thead><tr><th>#</th><th>From</th><th>Text</th>"
+                 f"<th>When</th></tr></thead><tbody>{items}</tbody></table></div>" if items else
+                 H.empty_state("inbox", "No requests yet", "Requests from viewers will show up here."))
+        body = f"""{H.page_head(f'Drama requests <span class="count">{len(rows)}</span>', "What viewers asked the bot to add.")}
+          <div class="card">{table}</div>"""
         self._html(200, H.layout("Requests", body, nav="requests", admin_id=admin_id))
 
     # ---------- mutations ----------
@@ -677,7 +827,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         except Exception as e:
             log.warning("post_card failed: %s", e)
             return self._redirect(f"/admin/drama/{d.id}?err=Saved+but+channel+post+failed")
-        self._redirect(f"/admin/drama/{d.id}?ok=Created+#{d.id}")
+        self._redirect(f"/admin/drama/{d.id}?ok=Created+%23{d.id}")
 
     def _upload_poster_bytes(self, filename: str, data: bytes) -> str | None:
         """Send image bytes to Telegram and return a file_id usable as poster."""

@@ -338,3 +338,18 @@ def test_add_drama_expands_ep_over_multipart(web):
     assert [l.url for l in groups["1080p"]] == ["https://b/1.mkv"]
     groups3 = dict(d.episodes[2].quality_groups())
     assert [l.url for l in groups3["480p"]] == ["https://x/3.mkv"]
+
+
+def test_redesigned_shell_keeps_contract(web):
+    """New sidebar UI: cache-busted assets, nav, empty states; link inputs stay type=text."""
+    st, body, _ = web.open("/admin/login")
+    assert "admin.css?v=3" in body and "admin.js?v=3" in body and "Dashboard" not in body
+    web.login_password()
+    _, body, _ = web.open("/admin")
+    assert 'id="sidebar"' in body and 'id="menu-btn"' in body and 'aria-current="page"' in body
+    _, body, _ = web.open("/admin/reports")
+    assert "No open reports" in body
+    _, body, _ = web.open("/admin/add")
+    assert 'id="ep-expand-preview"' in body and 'type="url"' not in body
+    st, body, _ = web.open("/admin/does-not-exist")
+    assert st == 404 and "Page not found" in body

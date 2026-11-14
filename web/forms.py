@@ -19,19 +19,21 @@ def quality_blocks(prefix: str = "") -> str:
     for q in QUALITIES:
         blocks.append(
             f'<div class="q-block" data-quality="{q}">'
-            f'<div class="q-title">{q}</div>'
+            f'<div class="q-head"><div class="q-title">{H.quality_pill(q)}'
+            f'<span class="q-sub">Parts &amp; mirrors</span></div>'
+            f'<div class="q-actions">'
+            f'<button type="button" class="btn ghost btn-sm add-part" data-q="{q}">＋ Part</button>'
+            f'<button type="button" class="btn ghost btn-sm add-mirror" data-q="{q}">＋ Mirror</button>'
+            f'</div></div>'
             f'<div class="q-parts">'
             f'<label>{q} · Part 1</label>'
             f'<input type="text" class="link" name="{q}" placeholder="https://…/{{ep}}.mkv" '
             f'inputmode="url" autocomplete="off" spellcheck="false">'
             f'</div>'
             f'<div class="q-mirrors"></div>'
-            f'<div class="q-actions">'
-            f'<button type="button" class="btn secondary btn-sm add-part" data-q="{q}">＋ Part</button>'
-            f'<button type="button" class="btn secondary btn-sm add-mirror" data-q="{q}">＋ Mirror</button>'
-            f'</div></div>'
+            f'</div>'
         )
-    return "".join(blocks)
+    return '<div class="q-grid">' + "".join(blocks) + '</div>'
 
 
 def add_episode_form(d, csrf: str, *, err: str = "") -> str:
@@ -55,29 +57,30 @@ def add_episode_form(d, csrf: str, *, err: str = "") -> str:
             f'<input type="hidden" name="season" id="addep-season" value="{default_sn}">'
         )
     err_html = (
-        f'<div class="flash err" id="addep-err">{H.e(err)}</div>'
+        f'<div class="flash err inline" id="addep-err">{H.e(err)}</div>'
         if err else
-        '<div class="flash err" id="addep-err" hidden></div>'
+        '<div class="flash err inline" id="addep-err" hidden></div>'
     )
     return (
         '<div class="card" id="add-episode">'
+        f'<div class="card-head"><div class="card-ic">{H.icon("plus-circle")}</div><div>'
         '<h2>Add episode</h2>'
         '<p class="muted">Fill any qualities you have — empty ones are skipped. '
-        'Use ＋ Part / ＋ Mirror for extra URLs.</p>'
+        'Use ＋ Part / ＋ Mirror for extra URLs.</p></div></div>'
         f'{err_html}'
         f'<form method="post" action="/admin/drama/addep" id="addep-form" '
         f"data-next='{H.e(json.dumps(next_map))}'>"
         f'{csrf}'
         f'<input type="hidden" name="drama_id" value="{d.id}">'
-        '<div class="row">'
+        '<div class="row narrow">'
         f'{season_html}'
         '<div><label>Episode number</label>'
         f'<input name="episode" id="addep-ep" value="{default_ep}" '
         'inputmode="numeric" required min="1" max="9999"></div>'
         '</div>'
         f'{quality_blocks()}'
-        '<div class="actions" style="margin-top:14px">'
-        '<button class="btn" type="submit">Add episode</button>'
+        '<div class="form-foot">'
+        f'<button class="btn" type="submit">{H.icon("plus")}Add episode</button>'
         '</div></form></div>'
     )
 
@@ -85,19 +88,18 @@ def add_episode_form(d, csrf: str, *, err: str = "") -> str:
 def add_drama_links_section(*, err: str = "") -> str:
     """From/To range + quality URL templates ({{ep}} expands) for the Add drama page."""
     err_html = (
-        f'<div class="flash err" id="add-links-err">{H.e(err)}</div>'
+        f'<div class="flash err inline" id="add-links-err">{H.e(err)}</div>'
         if err else
-        '<div class="flash err" id="add-links-err" hidden></div>'
+        '<div class="flash err inline" id="add-links-err" hidden></div>'
     )
     return (
         '<div class="ep-box" id="add-links">'
-        '<h3 style="margin:0 0 6px">Season 1 episodes <span class="muted">(optional)</span></h3>'
-        '<p class="muted" style="margin-top:0">Leave empty to create the drama with no episodes yet. '
+        '<p class="muted hint">Leave empty to create the drama with no episodes yet. '
         'Paste your links and put <code>{ep}</code> where the episode number goes. '
         'It will be replaced for every episode from → to when you create the drama.</p>'
-        '<p class="muted" id="ep-expand-preview" style="color:var(--gold)"></p>'
+        '<p class="ep-preview" id="ep-expand-preview" style="color:var(--gold)"></p>'
         f'{err_html}'
-        '<div class="row">'
+        '<div class="row narrow">'
         '<div><label>From episode</label>'
         '<input name="ep_from" id="ep-from" value="1" inputmode="numeric" min="1"></div>'
         '<div><label>To episode</label>'

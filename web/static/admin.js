@@ -1,3 +1,32 @@
+/* kdrama_heaven admin — vanilla JS, no build step. */
+(function shell() {
+  const body = document.body;
+  const btn = document.getElementById('menu-btn');
+  const scrim = document.getElementById('scrim');
+  const close = () => body.classList.remove('nav-open');
+  if (btn) btn.addEventListener('click', () => body.classList.toggle('nav-open'));
+  if (scrim) scrim.addEventListener('click', close);
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(); });
+  // toasts: dismiss on click, auto-hide success after 5s
+  document.querySelectorAll('.toast').forEach(t => {
+    const hide = () => { t.classList.add('hide'); setTimeout(() => t.remove(), 320); };
+    const x = t.querySelector('.toast-x');
+    if (x) x.addEventListener('click', hide);
+    if (t.classList.contains('ok')) setTimeout(hide, 5000);
+  });
+  // clickable table rows
+  document.querySelectorAll('tr[data-href]').forEach(tr => {
+    tr.addEventListener('click', (ev) => {
+      if (ev.target.closest('a, button, input, select, form')) return;
+      window.location.href = tr.getAttribute('data-href');
+    });
+  });
+  // open the edit panel if a hash points inside it
+  if (location.hash === '#edit') {
+    const d = document.querySelector('details.collapsible'); if (d) d.open = true;
+  }
+})();
+
 document.querySelectorAll('.tabs button').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
