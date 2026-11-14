@@ -97,6 +97,14 @@ New posts and `/edit <id> repost` use the aesthetic card (see `samples/`): title
 
 Channel post keyboards are shared by everyone, so the channel card only ever shows **Browse episodes / Request / Search**. Tapping Browse (or any episode/quality button on a channel post) never edits the post: the bot DMs that viewer their own copy of the card, and all episode → quality → parts/mirrors, Prev/Next and Back taps edit that private message. If the viewer hasn't started the bot yet, the tap opens `t.me/<bot>?start=drama_<id>`, and after /start they get the private card.
 
+## Public website
+The same web process (same `PORT`) serves a read-only catalog for viewers: `/` (home: featured hero, latest updates, ongoing, completed),
+`/search?q=` (+ live suggestions from `/api/search`, rate-limited per IP), and `/drama/<id>` (seasons, episode grid,
+480p/720p/1080p buttons with Part/Mirror). Quality buttons go through `/go/<link_id>`, which logs a click like the bot does and
+redirects to the stored URL. Anything that isn't an http(s) URL opens the bot instead (`?start=drama_<id>`). Telegram file_id posters are
+served from `/poster/<id>.jpg`, downloaded server-side so the token never reaches the browser. The catalog is cached in memory for 60 s and refreshed on admin edits.
+Uptime pingers and health checks should use `/healthz` (JSON); `/` is now the homepage.
+
 ## Tests
 `.venv/bin/pytest -q` runs the whole bot against a fake Telegram HTTP layer (`tests/fakes.py`) with a dummy token. No network access is needed.
 

@@ -8,10 +8,12 @@ def test_healthz_root_and_404():
     srv = start_health_server(port=0, host="127.0.0.1")
     port = srv.server_address[1]
     try:
-        for path in ("/healthz", "/"):
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
-                assert r.status == 200 and r.headers["Content-Type"] == "application/json"
-                assert json.loads(r.read())["ok"] is True
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5) as r:
+            assert r.status == 200 and r.headers["Content-Type"] == "application/json"
+            assert json.loads(r.read())["ok"] is True
+        # "/" is the public website once the bot context is set, plain health JSON before that
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as r:
+            assert r.status == 200
         req = urllib.request.Request(f"http://127.0.0.1:{port}/healthz", method="HEAD")
         with urllib.request.urlopen(req, timeout=5) as r:
             assert r.status == 200

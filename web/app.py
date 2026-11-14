@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import auth as authlib
 from . import html as H
+from . import public as P
 from .forms import add_drama_links_section, add_episode_form, expand_quality_range
 
 log = logging.getLogger(__name__)
@@ -214,8 +215,10 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path in {"/", "/healthz", "/health"}:
+        if path in {"/healthz", "/health"} or (path == "/" and "db" not in _CTX):
             return self._health()
+        if not path.startswith("/admin"):
+            return self._public(path)
         if path.startswith("/admin/static/"):
             return self._static(path[len("/admin/static/"):])
         if path == "/admin/login":
@@ -267,7 +270,10 @@ class AdminHandler(BaseHTTPRequestHandler):
             "/admin/request/reply": lambda: self._request_reply_post(admin, fields),
         }
         if path in handlers:
-            return handlers[path]()
+            try:
+                return handlers[path]()
+            finally:
+                P.invalidate()  # public catalog reflects admin edits right away
         self._html(404, H.layout("Not found", H.empty_state("info", "404 — Page not found", "That page doesn't exist.", "<a class='btn secondary' href='/admin'>Go to dashboard</a>"), admin_id=admin))
 
     # ---------- public ----------
@@ -292,9 +298,112 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "public, max-age=3600")
+        self.send_header("Cache-Control", "public, max-age=86400")  # assets are cache-busted with ?v=
         self.end_headers()
         self.wfile.write(data)
+
+    # ---------- public website ----------
+    def _host(self) -> str:
+        host = (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").split(",")[0].strip()
+        return host if re.fullmatch(r"[A-Za-z0-9.\-]+(:\d+)?", host or "") else ""
+
+    def _send(self, code: int, data: bytes, ctype: str, cache: str, headers: dict | None = None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", cache)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _page(self, code: int, html: str):
+        self._send(code, html.encode(), "text/html; charset=utf-8",
+                   "public, max-age=60" if code == 200 else "no-store",
+                   {"Referrer-Policy": "strict-origin-when-cross-origin", "X-Frame-Options": "SAMEORIGIN"})
+
+    def _public(self, path: str):
+        q = parse_qs(urlparse(self.path).query)
+        arg = lambda k: (q.get(k, [""])[0] or "").strip()
+        host = self._host()
+        if path.startswith("/static/"):
+            return self._static(path[len("/static/"):])
+        if path in {"/favicon.svg", "/favicon.ico"}:
+            return self._send(200, P.favicon_svg(), "image/svg+xml", "public, max-age=604800")
+        if path == "/robots.txt":
+            return self._send(200, b"User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /go/\nDisallow: /api/\n",
+                              "text/plain; charset=utf-8", "public, max-age=86400")
+        if "db" not in _CTX:
+            return self._json(503, {"ok": False, "error": "starting"})
+        try:
+            if path == "/":
+                return self._page(200, P.home(_CTX, arg("status"), host))
+            if path == "/search":
+                return self._page(200, P.search_page(_CTX, arg("q"), host))
+            if path == "/api/search":
+                if not P.rate_ok(self._ip()):
+                    return self._send(429, P.json_bytes({"error": "Too many requests, slow down."}),
+                                      "application/json", "no-store", {"Retry-After": "10"})
+                return self._send(200, P.json_bytes(P.api_search(_CTX, arg("q")[:80])),
+                                  "application/json; charset=utf-8", "public, max-age=30")
+            m = re.fullmatch(r"/drama/(\d+)(?:-[a-z0-9-]*)?/?", path)
+            if m:
+                s_, ep_ = arg("s"), arg("ep")
+                html = P.drama_page(_CTX, int(m.group(1)), int(s_) if s_.isdigit() else None,
+                                    int(ep_) if ep_.isdigit() else None, host)
+                if html:
+                    return self._page(200, html)
+            m = re.fullmatch(r"/go/(\d+)", path)
+            if m:
+                return self._go(m.group(1))
+            m = re.fullmatch(r"/poster/(\d+)\.jpg", path)
+            if m:
+                return self._poster(int(m.group(1)))
+        except Exception:
+            log.exception("public page %s failed", path)
+            return self._send(500, b"Something went wrong.", "text/plain; charset=utf-8", "no-store")
+        self._page(404, P.not_found(_CTX, host))
+
+    def _go(self, ref: str):
+        if not P.rate_ok("go:" + self._ip(), n=60, window=60):
+            return self._send(429, b"Too many requests", "text/plain", "no-store")
+        url, info = P.resolve_link(_CTX, ref)
+        if not url:
+            return self._page(404, P.not_found(_CTX, self._host()))
+        if info and info.get("log"):
+            try:
+                _CTX["db"].add_click(info["drama_id"], info["episode"], info["quality"], None, season=info["season"])
+            except Exception:
+                log.warning("click log failed", exc_info=True)
+        self.send_response(302)
+        self.send_header("Location", url)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _poster(self, did: int):
+        d = P.catalog(_CTX)["by_id"].get(did)
+        ref = d and d.get("poster_ref")
+        if not ref:
+            return self._send(404, b"", "image/jpeg", "no-store")
+        if P.is_http(ref):
+            self.send_response(302); self.send_header("Location", ref)
+            self.send_header("Cache-Control", "public, max-age=3600"); self.send_header("Content-Length", "0")
+            return self.end_headers()
+        hit = P.poster_cached(ref)
+        if not hit:
+            try:
+                data = run_async(P.fetch_poster_bytes(_CTX, ref), timeout=20)
+            except Exception as e:
+                log.info("poster %s fetch failed: %s", did, e)
+                data = None
+            if not data:
+                return self._send(404, b"", "image/jpeg", "public, max-age=300")
+            P.poster_store(ref, data)
+            hit = (data, "image/jpeg")
+        self._send(200, hit[0], hit[1], "public, max-age=604800, immutable")
 
     # ---------- auth ----------
     def _login_get(self):
