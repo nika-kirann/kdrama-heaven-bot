@@ -449,3 +449,295 @@ function wireQualityButtons(root) {
   setInterval(tick, INTERVAL);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
 })();
+
+(function addDramaSilent() {
+  const form = document.getElementById('add-drama-form');
+  if (!form) return;
+  const box = form.querySelector('input[name="silent"]');
+  const hint = document.getElementById('add-post-hint');
+  const btn = document.getElementById('add-submit');
+  if (!box || !btn) return;
+  const defaultHtml = btn.innerHTML;
+  function sync() {
+    if (box.checked) {
+      if (hint) hint.textContent = "The drama is saved only — nothing is posted to the channel.";
+      btn.innerHTML = 'Create without posting';
+    } else {
+      if (hint) hint.textContent = "The channel card is posted as soon as you create.";
+      btn.innerHTML = defaultHtml;
+    }
+  }
+  box.addEventListener('change', sync);
+  sync();
+})();
+
+(function bulkForm() {
+  const form = document.getElementById('bulk-form');
+  if (!form) return;
+  wireQualityButtons(form);
+  const modeEl = document.getElementById('bulk-mode');
+  const rangePane = document.getElementById('bulk-range');
+  const pastePane = document.getElementById('bulk-paste');
+  const live = document.getElementById('bulk-live-preview');
+  const serverPrev = document.getElementById('bulk-server-preview');
+  const errEl = document.getElementById('bulk-err');
+  const existingMap = JSON.parse(form.getAttribute('data-existing') || '{}');
+  const QUALITIES = ['480p', '720p', '1080p'];
+
+  function showErr(msg) {
+    if (!errEl) return;
+    errEl.hidden = !msg;
+    errEl.textContent = msg || '';
+  }
+
+  function setMode(mode) {
+    if (modeEl) modeEl.value = mode;
+    if (rangePane) rangePane.hidden = mode !== 'range';
+    if (pastePane) pastePane.hidden = mode !== 'paste';
+    form.querySelectorAll('[data-bulk-tab]').forEach(b => {
+      b.classList.toggle('active', b.getAttribute('data-bulk-tab') === mode);
+    });
+    updateLive();
+  }
+  form.querySelectorAll('[data-bulk-tab]').forEach(btn => {
+    btn.addEventListener('click', () => setMode(btn.getAttribute('data-bulk-tab')));
+  });
+
+  function existingNums() {
+    const sn = (document.getElementById('bulk-season') || {}).value || '1';
+    return new Set((existingMap[sn] || []).map(Number));
+  }
+
+  function onExisting() {
+    const el = form.querySelector('input[name="on_existing"]:checked');
+    return (el && el.value) || 'skip';
+  }
+
+  function fillEp(tmpl, n) {
+    return tmpl.replace(/\{(episode|ep)\}/gi, String(n));
+  }
+
+  function parseRange() {
+    const urls = [];
+    form.querySelectorAll('#bulk-range .q-block').forEach(block => {
+      const q = block.getAttribute('data-quality');
+      block.querySelectorAll('.q-parts input').forEach(inp => {
+        const v = inp.value.trim();
+        if (v) urls.push({ q, url: v, kind: 'part' });
+      });
+      block.querySelectorAll('.q-mirrors input').forEach(inp => {
+        const v = inp.value.trim();
+        if (v) urls.push({ q, url: v, kind: 'mirror' });
+      });
+    });
+    if (!urls.length) return { episodes: {}, error: null, empty: true };
+    if (urls.find(u => !/^https?:\/\//i.test(u.url))) {
+      return { episodes: {}, error: 'Every link must start with http:// or https://' };
+    }
+    let fr = (document.getElementById('bulk-from').value || '1').trim() || '1';
+    let to = (document.getElementById('bulk-to').value || '').trim() || fr;
+    if (!/^\d+$/.test(fr) || !/^\d+$/.test(to) || +fr < 1 || +to < +fr || +to > 9999) {
+      return { episodes: {}, error: 'From/To range invalid (need 1 ≤ from ≤ to ≤ 9999)' };
+    }
+    const episodes = {};
+    for (let n = +fr; n <= +to; n++) {
+      episodes[n] = urls.map(u => ({ q: u.q, url: fillEp(u.url, n), kind: u.kind }));
+    }
+    return { episodes, error: null };
+  }
+
+  function parsePaste() {
+    const text = (document.getElementById('bulk-paste-box') || {}).value || '';
+    const episodes = {};
+    const issues = [];
+    const lines = text.split(/\r?\n/);
+    const epCell = /^(?:ep|episode|#)?\s*[:#]?\s*(\d+)$/i;
+    const labeled = /(480p|720p|1080p|hd|4k|2160p|540p)([\s_\-]*mirror)?\s*[:.\-]?\s*(https?:\/\/\S+)/i;
+    const headers = { ep: 1, episode: 1, 'ep#': 1, '#': 1, num: 1, number: 1, '480p': 1, '720p': 1, '1080p': 1 };
+    function splitRow(line) {
+      if (line.includes('|')) return line.split('|').map(s => s.trim());
+      if (line.includes('\t')) return line.split('\t').map(s => s.trim());
+      const parts = line.split(',').map(s => s.trim());
+      if (parts.length >= 2 && epCell.test(parts[0])) return parts;
+      const toks = line.trim().split(/\s+/);
+      if (toks.length >= 2 && epCell.test(toks[0]) && toks.slice(1).some(t => /^https?:\/\//i.test(t) || labeled.test(t))) {
+        return [toks[0]].concat(toks.slice(1));
+      }
+      return [line.trim()];
+    }
+    function parseCell(cell, defaultQ) {
+      const out = [];
+      const raw = (cell || '').trim();
+      if (!raw) return out;
+      const re = /(480p|720p|1080p|hd|4k|2160p|540p)([\s_\-]*mirror)?\s*[:.\-]?\s*(https?:\/\/\S+)/ig;
+      let leftover = raw, m;
+      const spans = [];
+      while ((m = re.exec(raw))) {
+        const q = m[1].toLowerCase() === 'hd' ? 'HD' : (['4k', '2160p'].includes(m[1].toLowerCase()) ? '4K' : m[1].toLowerCase());
+        out.push({ q, url: m[3], kind: m[2] ? 'mirror' : 'part' });
+        spans.push([m.index, m.index + m[0].length]);
+      }
+      spans.reverse().forEach(([a, b]) => { leftover = leftover.slice(0, a) + ' ' + leftover.slice(b); });
+      leftover.split(/[,\s]+/).filter(Boolean).forEach(tok => {
+        if (!defaultQ) throw new Error('this column needs a quality or a labeled link');
+        if (!/^https?:\/\//i.test(tok) || /\s/.test(tok)) throw new Error('not a valid http(s) link: ' + tok.slice(0, 60));
+        out.push({ q: defaultQ, url: tok, kind: 'part' });
+      });
+      return out;
+    }
+    if (!text.trim()) return { episodes: {}, error: null, empty: true, issues };
+    lines.forEach((raw, i) => {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) return;
+      const cells = splitRow(line);
+      const head = (cells[0] || '').trim().toLowerCase().replace(/[:#]+$/, '');
+      if (headers[head] && !cells.some(c => c.includes('://'))) return;
+      const m = epCell.exec(cells[0] || '');
+      if (!m) { issues.push({ line: i + 1, kind: 'error', message: 'Line must start with an episode number', text: line }); return; }
+      const ep = +m[1];
+      if (ep < 1 || ep > 9999) { issues.push({ line: i + 1, kind: 'error', message: 'Episode number must be 1–9999', text: line }); return; }
+      try {
+        const rest = cells.slice(1);
+        if (!rest.length) throw new Error('no links on this line');
+        const links = [];
+        rest.forEach((cell, idx) => {
+          const dq = QUALITIES[idx] || '1080p';
+          links.push(...parseCell(cell, dq));
+        });
+        if (!links.length) throw new Error('No valid http(s) links on this line');
+        if (episodes[ep]) {
+          episodes[ep] = episodes[ep].concat(links);
+          issues.push({ line: i + 1, kind: 'warn', message: 'EP ' + ep + ' appears more than once — links were merged', text: line });
+        } else episodes[ep] = links;
+      } catch (e) {
+        issues.push({ line: i + 1, kind: 'error', message: e.message, text: line });
+      }
+    });
+    const errors = issues.filter(x => x.kind === 'error');
+    return { episodes, issues, error: (!Object.keys(episodes).length && errors[0]) ? errors[0].message : null };
+  }
+
+  function planOf(episodes) {
+    const exist = existingNums();
+    const mode = onExisting();
+    const add = {}, skip = [], overwrite = [];
+    Object.keys(episodes).map(Number).sort((a, b) => a - b).forEach(n => {
+      if (exist.has(n)) {
+        if (mode === 'overwrite') { add[n] = episodes[n]; overwrite.push(n); }
+        else skip.push(n);
+      } else add[n] = episodes[n];
+    });
+    return { add, skip, overwrite };
+  }
+
+  function summary(links) {
+    const quals = [];
+    (links || []).forEach(l => { if (!quals.includes(l.q)) quals.push(l.q); });
+    const n = (links || []).length;
+    return quals.join(', ') + ' · ' + n + ' link' + (n === 1 ? '' : 's');
+  }
+
+  function renderLive(parsed) {
+    if (!live) return;
+    if (parsed.empty) { live.hidden = true; live.innerHTML = ''; return; }
+    if (parsed.error && !Object.keys(parsed.episodes || {}).length) {
+      live.hidden = false;
+      live.innerHTML = '<div class="preview-head"><h3>Live preview</h3></div><p class="muted">' + escapeHtml(parsed.error) + '</p>';
+      return;
+    }
+    const plan = planOf(parsed.episodes || {});
+    const issues = parsed.issues || [];
+    const rows = [];
+    const all = [];
+    Object.keys(plan.add).forEach(n => all.push([+n, plan.add[n], plan.overwrite.includes(+n) ? 'overwrite' : 'new']));
+    plan.skip.forEach(n => all.push([n, null, 'skip']));
+    all.sort((a, b) => a[0] - b[0]);
+    const max = 40;
+    const shown = all.length > max ? all.slice(0, max - 6).concat([[null, null, 'ellipsis']]).concat(all.slice(-6)) : all;
+    const hidden = all.length > max ? all.length - (max - 6) - 6 : 0;
+    shown.forEach(([n, links, status]) => {
+      if (status === 'ellipsis') {
+        rows.push('<tr class="preview-more"><td colspan="3">' + hidden + ' more episodes not shown here.</td></tr>');
+        return;
+      }
+      const badge = status === 'new' ? '<span class="pill ok">new</span>'
+        : status === 'overwrite' ? '<span class="pill warn">exists — will overwrite</span>'
+        : '<span class="pill neutral">exists — will skip</span>';
+      const url = links && links[0] ? escapeHtml(links[0].url) : '';
+      const sum = links ? escapeHtml(summary(links)) : 'already in the database';
+      rows.push('<tr class="st-' + status + '"><td><span class="ep-n">EP ' + n + '</span></td><td>' + sum
+        + (url ? '<div class="preview-url" title="' + url + '">' + url + '</div>' : '') + '</td><td>' + badge + '</td></tr>');
+    });
+    const nNew = Object.keys(plan.add).length - plan.overwrite.length;
+    const pills = [];
+    if (nNew) pills.push('<span class="pill ok">' + nNew + ' new</span>');
+    if (plan.overwrite.length) pills.push('<span class="pill warn">' + plan.overwrite.length + ' overwrite</span>');
+    if (plan.skip.length) pills.push('<span class="pill neutral">' + plan.skip.length + ' skipped</span>');
+    const errN = issues.filter(x => x.kind === 'error').length;
+    if (errN) pills.push('<span class="pill err">' + errN + ' line error' + (errN === 1 ? '' : 's') + '</span>');
+    const issueHtml = issues.length
+      ? '<ul class="preview-issues">' + issues.slice(0, 8).map(x =>
+          '<li class="' + x.kind + '">Line ' + x.line + ': ' + escapeHtml(x.message) + '</li>').join('') + '</ul>'
+      : '';
+    live.hidden = false;
+    live.innerHTML = '<div class="preview-head"><h3>Live preview</h3><div class="pills">' + pills.join('')
+      + '</div></div>' + issueHtml
+      + '<div class="table-wrap"><table class="table compact preview-table"><thead><tr><th>Ep</th><th>Links</th><th>Status</th></tr></thead><tbody>'
+      + (rows.join('') || '<tr><td colspan="3" class="muted">Nothing to import.</td></tr>')
+      + '</tbody></table></div>';
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
+  function currentParse() {
+    const mode = (modeEl && modeEl.value) || 'range';
+    return mode === 'paste' ? parsePaste() : parseRange();
+  }
+
+  function updateLive(fromUser) {
+    if (fromUser && serverPrev) serverPrev.hidden = true;
+    if (serverPrev && !serverPrev.hidden) {
+      if (live) live.hidden = true;
+      return;
+    }
+    renderLive(currentParse());
+  }
+
+  form.addEventListener('input', () => updateLive(true));
+  form.addEventListener('change', () => updateLive(true));
+  const rangeHint = document.getElementById('bulk-range-hint');
+  function updateRangeHint() {
+    if (!rangeHint) return;
+    const parsed = parseRange();
+    if (parsed.empty || parsed.error) { rangeHint.textContent = ''; return; }
+    const keys = Object.keys(parsed.episodes).map(Number);
+    const sample = parsed.episodes[keys[0]][0].url;
+    const n = keys.length;
+    rangeHint.textContent = n === 1
+      ? 'Will create episode ' + keys[0] + ': ' + sample
+      : 'Will create ' + n + ' episodes (' + keys[0] + '–' + keys[keys.length - 1] + '). Example: ' + sample;
+  }
+  form.addEventListener('input', updateRangeHint);
+  updateRangeHint();
+  updateLive();
+
+  form.addEventListener('submit', (ev) => {
+    showErr('');
+    const parsed = currentParse();
+    if (parsed.empty) {
+      ev.preventDefault();
+      showErr((modeEl && modeEl.value) === 'paste'
+        ? 'Paste one episode per line, or use the range tab'
+        : 'Add a from/to range and at least one http(s) link template');
+      return;
+    }
+    if (parsed.error && !Object.keys(parsed.episodes || {}).length) {
+      ev.preventDefault();
+      showErr(parsed.error);
+    }
+  });
+})();

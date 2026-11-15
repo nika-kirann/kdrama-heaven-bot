@@ -99,6 +99,14 @@ New posts and `/edit <id> repost` use the aesthetic card (see `samples/`): title
 
 Channel post keyboards are shared by everyone, so the channel card only ever shows **Browse episodes / Request / Search**. Tapping Browse (or any episode/quality button on a channel post) never edits the post: the bot DMs that viewer their own copy of the card, and all episode → quality → parts/mirrors, Prev/Next and Back taps edit that private message. If the viewer hasn't started the bot yet, the tap opens `t.me/<bot>?start=drama_<id>`, and after /start they get the private card.
 
+## Admin website
+The same process serves a private `/admin` panel (Telegram login code or password). On a drama page you can add one episode, or open **Bulk add episodes** to import many at once:
+
+- **Range templates** — from/to plus 480p/720p/1080p link templates. `{ep}` is filled in for every episode, including extra parts and mirrors (same as Add drama).
+- **Paste list** — one episode per line, for example `12 | 480p-link | 720p-link | 1080p-link`. Empty columns are skipped; you can also write `720p: https://…`.
+- A **Preview import** step shows what will be added and flags episodes that already exist. Choose **Skip existing** (default) or **Overwrite** those qualities.
+- **Silent import** is checked by default on bulk add: nothing is posted to the channel or group, and followers are not notified. The episodes still appear on the public website and in the bot. The same silent checkbox is on the single Add episode form and on Add drama (off by default there, so a new drama still posts its channel card unless you turn it on).
+
 ## Public website
 The same web process (same `PORT`) serves a read-only catalog for viewers: `/` (home: featured hero, latest updates, ongoing, completed),
 `/search?q=` (+ live suggestions from `/api/search`, rate-limited per IP), and `/drama/<id>` (seasons, episode grid,

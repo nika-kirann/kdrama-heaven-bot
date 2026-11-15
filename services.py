@@ -17,6 +17,17 @@ from telegram.error import BadRequest, Forbidden
 from utils import DAYS, countdown_text, describe_links, h, local_midnight_utc, safe_call
 
 log = logging.getLogger(__name__)
+
+
+def _invalidate_site():
+    """Drop the public site's 60 s catalog snapshot so new episodes show up now."""
+    try:
+        from web import public as P
+        P.invalidate()
+    except Exception:
+        pass
+
+
 CAPTION_LIMIT = 1024
 
 
@@ -305,23 +316,27 @@ class ChannelService:
         return d
 
     async def add_episodes(self, drama_id: int, episodes, start: int | None = None,
-                           season: int | None = None) -> list[int]:
-        """episodes: {ep: [(quality, url, kind)]} or a legacy list of URLs. season=None → current."""
+                           season: int | None = None, *, silent: bool = False) -> list[int]:
+        """episodes: {ep: [(quality, url, kind)]} or a legacy list of URLs. season=None → current.
+        silent=True writes to the DB only: no channel/group post, no card edit, no follower DMs.
+        The episodes still show on the public website and in the bot."""
         d0 = self.db.get_drama(drama_id)
         cur = d0.season(season) if season else d0.current
         if isinstance(episodes, list):
             first = start or max((e.number for e in (cur.episodes if cur else d0.episodes)), default=0) + 1
             episodes = {first + i: [("HD", u, "part")] for i, u in enumerate(episodes)}
         nums = self.db.add_episodes(drama_id, episodes, season=season)
-        if self.db.get_drama(drama_id).next_ep_date:  # the date was for this episode: hide the block
+        if not silent and self.db.get_drama(drama_id).next_ep_date:  # the date was for this episode: hide the block
             self.db.update_drama(drama_id, next_ep_date=None, air_time=None)
-        await self.refresh_card(drama_id)
-        d = self.db.get_drama(drama_id)
-        sn = season or (d.current.number if d.current else 1)
-        prefix = f"S{sn} " if d.is_multi else ""
-        await self._send(f"🆕 <b>New episodes</b>: {h(d.title)} — {prefix}{h(describe_links(episodes))} added! 📺",
-                         "service", drama_id)
-        await self.notify_followers(drama_id, f"🆕 {prefix}{h(describe_links(episodes))} just landed!")
+        if not silent:
+            await self.refresh_card(drama_id)
+            d = self.db.get_drama(drama_id)
+            sn = season or (d.current.number if d.current else 1)
+            prefix = f"S{sn} " if d.is_multi else ""
+            await self._send(f"🆕 <b>New episodes</b>: {h(d.title)} — {prefix}{h(describe_links(episodes))} added! 📺",
+                             "service", drama_id)
+            await self.notify_followers(drama_id, f"🆕 {prefix}{h(describe_links(episodes))} just landed!")
+        _invalidate_site()
         return nums
 
     async def new_season(self, drama_id: int, total_episodes: int | None = None):

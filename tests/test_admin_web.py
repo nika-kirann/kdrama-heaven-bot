@@ -71,15 +71,15 @@ def web(tmp_path):
             bot.sent.append({"refresh": drama_id}); return True
         async def set_poster(self, drama_id, poster):
             db.update_drama(drama_id, poster=poster); return db.get_drama(drama_id)
-        async def add_episodes(self, drama_id, episodes, start=None, season=None):
-            from services import ChannelService
-            # reuse real logic via a throwaway ChannelService with fake bot
-            real = ChannelService(bot, db, cfg)
-            # avoid follower DM spam: temporarily empty followers by not calling notify
+        async def add_episodes(self, drama_id, episodes, start=None, season=None, silent=False):
             nums = db.add_episodes(drama_id, episodes, season=season)
-            if db.get_drama(drama_id).next_ep_date:
+            if not silent and db.get_drama(drama_id).next_ep_date:
                 db.update_drama(drama_id, next_ep_date=None, air_time=None)
-            await self.refresh_card(drama_id)
+            if not silent:
+                await self.refresh_card(drama_id)
+                bot.sent.append({"announce": drama_id, "eps": list(episodes) if isinstance(episodes, dict) else episodes})
+            else:
+                bot.sent.append({"silent_import": drama_id})
             return nums
         async def new_season(self, drama_id, total_episodes=None):
             sea = db.add_season(drama_id, total_episodes)

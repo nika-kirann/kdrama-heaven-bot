@@ -17,7 +17,8 @@ from urllib.parse import parse_qs, urlparse
 from . import auth as authlib
 from . import html as H
 from . import public as P
-from .forms import add_drama_links_section, add_episode_form, expand_quality_range
+from .forms import (add_drama_links_section, add_episode_form, bulk_add_form,
+                    expand_quality_range, parse_paste_lines, plan_bulk, silent_checkbox)
 
 WEB_POSTER_ERR = "Website poster must be a plain http(s) image URL"
 
@@ -72,6 +73,10 @@ def _field_list(fields: dict, key: str) -> list[str]:
     if isinstance(v, list):
         return [x.strip() for x in v if isinstance(x, str) and x.strip()]
     return [v.strip()] if isinstance(v, str) and v.strip() else []
+
+
+def _flag(fields: dict, key: str) -> bool:
+    return _field(fields, key).strip().lower() in {"1", "on", "true", "yes"}
 
 
 def get_auth() -> authlib.AuthState:
@@ -257,6 +262,9 @@ class AdminHandler(BaseHTTPRequestHandler):
         }
         if path in routes:
             return routes[path](admin)
+        m = re.fullmatch(r"/admin/drama/(\d+)/bulk", path)
+        if m:
+            return self._bulk_get(admin, int(m.group(1)))
         m = re.fullmatch(r"/admin/drama/(\d+)", path)
         if m:
             return self._drama_detail(admin, int(m.group(1)))
@@ -280,6 +288,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             "/admin/add": lambda: self._add_post(admin, fields, files),
             "/admin/drama/edit": lambda: self._edit_post(admin, fields, files),
             "/admin/drama/addep": lambda: self._addep_post(admin, fields),
+            "/admin/drama/bulk": lambda: self._bulk_post(admin, fields),
             "/admin/drama/newseason": lambda: self._newseason_post(admin, fields),
             "/admin/drama/complete": lambda: self._complete_post(admin, fields),
             "/admin/drama/delete": lambda: self._delete_post(admin, fields),
@@ -719,7 +728,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             )
             table = (f"<div class='table-wrap'><table class='table compact'><thead><tr><th>Ep</th><th>Quality</th>"
                      f"<th>Links</th></tr></thead><tbody>{eps_rows}</tbody></table></div>" if eps_rows else
-                     H.empty_state("tv", "No episodes yet", "Use the Add episode form above."))
+                     H.empty_state("tv", "No episodes yet", "Use Add episode above, or Bulk add for a range or a pasted list."))
             del_season = ("<form method='post' action='/admin/drama/delete'>" + csrf +
                           f"<input type='hidden' name='drama_id' value='{d.id}'><input type='hidden' name='season' value='{sea.number}'>"
                           f"<button class='btn danger-ghost btn-sm' data-confirm='Delete Season {sea.number}? This cannot be undone.' type='submit'>{H.icon('trash')}Delete season</button></form>"
@@ -730,6 +739,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 <div><h2>{heading} {H.status_badge(sea.status)}</h2>
                 <p class="muted">{len(sea.episodes)}{('/'+str(sea.total_episodes)) if sea.total_episodes else ''} eps</p></div></div>
                 <div class="actions">
+                  <a class="btn ghost btn-sm" href="/admin/drama/{d.id}/bulk?season={sea.number}">{H.icon('layers')}Bulk add</a>
                   <form method="post" action="/admin/drama/complete">{csrf}
                     <input type="hidden" name="drama_id" value="{d.id}">
                     <input type="hidden" name="season" value="{sea.number}">
@@ -843,7 +853,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         links_err = q.get("links_err", [None])[0] or ""
         flash = err if err and not links_err else None
         body = f"""
-        {H.page_head("Add drama", "Creates Season 1 and posts the channel card (same as /add).", back="/admin/dramas")}
+        {H.page_head("Add drama", "Creates Season 1 and posts the channel card (same as /add), unless you create silently.", back="/admin/dramas")}
         <form method="post" action="/admin/add" enctype="multipart/form-data" id="add-drama-form" class="form-grid">
           {csrf}
           <div class="card">
@@ -883,9 +893,11 @@ class AdminHandler(BaseHTTPRequestHandler):
               <p class="muted">Bulk-create episodes from link templates</p></div></div>
             {add_drama_links_section(err=links_err)}
           </div>
-          <div class="sticky-foot">
-            <span class="muted sm">The channel card is posted as soon as you create.</span>
-            <button class="btn lg" type="submit">{H.icon('send')}Create &amp; post</button>
+          <div class="sticky-foot add-foot">
+            {silent_checkbox(checked=False, title="Create silently",
+                             hint="Don't post the channel card, and don't notify anyone. The drama still appears on the website and in the bot.")}
+            <span class="muted sm" id="add-post-hint">The channel card is posted as soon as you create.</span>
+            <button class="btn lg" type="submit" id="add-submit">{H.icon('send')}Create &amp; post</button>
           </div>
         </form>"""
         self._html(200, H.layout("Add drama", body, nav="add", admin_id=admin_id,
@@ -1077,6 +1089,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         if err:
             return self._redirect("/admin/add?links_err=" + quote(err))
         d = db.add_drama(**kw, episodes=eps)
+        if _flag(fields, "silent"):
+            return self._redirect(f"/admin/drama/{d.id}?ok=" + quote(f"Created #{d.id} (not posted to the channel)"))
         try:
             run_async(svc.post_card(d))
         except Exception as e:
@@ -1188,8 +1202,123 @@ class AdminHandler(BaseHTTPRequestHandler):
                 links.append((qname, url, "mirror"))
         if not links:
             return self._redirect(f"/admin/drama/{did}?addep_err=" + quote("At least one valid http(s) link is required"))
-        run_async(svc.add_episodes(did, {ep_n: links}, season=season))
-        self._redirect(f"/admin/drama/{did}?ok=" + quote(f"Episode {ep_n} added") + f"#season-{season}")
+        silent = _flag(fields, "silent")
+        run_async(svc.add_episodes(did, {ep_n: links}, season=season, silent=silent))
+        note = " (silent)" if silent else ""
+        self._redirect(f"/admin/drama/{did}?ok=" + quote(f"Episode {ep_n} added{note}") + f"#season-{season}")
+
+
+    def _bulk_get(self, admin_id: int, drama_id: int, *, err: str = "", values: dict | None = None,
+                  plan: dict | None = None, flash: str | None = None, flash_kind: str = "ok"):
+        db = _CTX["db"]
+        d = db.get_drama(drama_id)
+        if not d or d.deleted:
+            return self._html(404, H.layout("Missing", H.empty_state(
+                "film", "Drama not found", "It may have been deleted.",
+                f"<a class='btn secondary' href='/admin/dramas'>{H.icon('arrow-left')}Back to dramas</a>"),
+                nav="dramas", admin_id=admin_id))
+        values = dict(values or {})
+        q = parse_qs(urlparse(self.path).query)
+        if "season" not in values and q.get("season"):
+            values["season"] = q.get("season", [""])[0]
+        csrf = self._csrf(admin_id)
+        form = bulk_add_form(d, csrf, err=err, values=values, plan=plan, field_list=_field_list)
+        sub = f"Import a range or a pasted list into <b>{H.e(d.title)}</b> · #{d.id}."
+        actions = (f"<a class='btn secondary' href='/admin/drama/{d.id}#add-episode'>"
+                   f"{H.icon('plus')}Single episode</a>")
+        body = f"""
+        {H.page_head("Bulk add episodes", sub, back=f"/admin/drama/{d.id}", actions=actions)}
+        <div class="card" id="bulk-add">
+          <div class="card-head"><div class="card-ic gold">{H.icon('layers')}</div>
+            <div><h2>Import into {H.e(d.title)}</h2>
+            <p class="muted">Silent import is on by default, so nothing is posted to the channel or sent to followers.
+              Episodes still show on the website and in the bot.</p></div></div>
+          {form}
+        </div>
+        """
+        self._html(200, H.layout(f"Bulk add · {d.title}", body, nav="dramas", admin_id=admin_id,
+                                 flash_msg=flash, flash_kind=flash_kind))
+
+    def _plan_bulk(self, fields: dict, d):
+        """Parse the bulk form into a plan. Returns (plan, error_or_None)."""
+        season_s = _field(fields, "season")
+        season = int(season_s) if season_s.isdigit() else (d.current.number if d.current else 1)
+        sea = d.season(season)
+        if not sea:
+            return None, "Invalid season"
+        existing = {e.number for e in sea.episodes}
+        mode = _field(fields, "mode", "range").strip().lower() or "range"
+        issues: list[dict] = []
+        if mode == "paste":
+            eps, issues = parse_paste_lines(_field(fields, "paste"))
+            errors = [i for i in issues if i.get("kind") == "error"]
+            if not eps:
+                msg = errors[0]["message"] if errors else "No valid episodes in the paste box"
+                plan = {"add": {}, "skip": [], "overwrite": [], "issues": issues,
+                        "season": season, "mode": mode,
+                        "on_existing": _field(fields, "on_existing", "skip")}
+                return plan, msg
+        else:
+            eps, err = expand_quality_range(fields, _field, _field_list)
+            if err:
+                return None, err
+            if not eps:
+                return None, "Add a from/to range and at least one http(s) link template"
+        on_existing = _field(fields, "on_existing", "skip").strip().lower()
+        if on_existing not in {"skip", "overwrite"}:
+            on_existing = "skip"
+        plan = plan_bulk(eps, existing, on_existing)
+        plan.update(issues=issues, season=season, mode=mode, silent=_flag(fields, "silent"),
+                    on_existing=on_existing)
+        return plan, None
+
+    def _bulk_values(self, fields: dict) -> dict:
+        return {
+            "season": _field(fields, "season"),
+            "mode": _field(fields, "mode", "range"),
+            "ep_from": _field(fields, "ep_from"),
+            "ep_to": _field(fields, "ep_to"),
+            "paste": _field(fields, "paste"),
+            "on_existing": _field(fields, "on_existing", "skip"),
+            "silent": "1" if _flag(fields, "silent") else "0",
+            "quality_values": {k: _field_list(fields, k)
+                               for q in ("480p", "720p", "1080p")
+                               for k in (q, f"{q}_mirror")},
+        }
+
+    def _bulk_post(self, admin_id: int, fields: dict):
+        from urllib.parse import quote
+        db, svc = _CTX["db"], _CTX["svc"]
+        did = int(_field(fields, "drama_id") or 0)
+        d = db.get_drama(did)
+        if not d or d.deleted:
+            return self._redirect("/admin/dramas?err=Missing")
+        action = _field(fields, "action", "preview").strip().lower() or "preview"
+        plan, err = self._plan_bulk(fields, d)
+        values = self._bulk_values(fields)
+        if err:
+            return self._bulk_get(admin_id, did, err=err, values=values, plan=plan)
+        if action != "import":
+            return self._bulk_get(admin_id, did, values=values, plan=plan)
+        add = (plan or {}).get("add") or {}
+        if not add:
+            skipped = len((plan or {}).get("skip") or [])
+            msg = (f"Nothing new to import — {skipped} episode"
+                   f"{'s' if skipped != 1 else ''} already exist and were skipped."
+                   if skipped else "Nothing to import")
+            return self._bulk_get(admin_id, did, err=msg, values=values, plan=plan)
+        silent = _flag(fields, "silent")
+        season = plan["season"]
+        run_async(svc.add_episodes(did, add, season=season, silent=silent))
+        n_new = len(add) - len(plan.get("overwrite") or [])
+        bits = [f"{n_new} added"] if n_new else []
+        if plan.get("overwrite"):
+            bits.append(f"{len(plan['overwrite'])} overwritten")
+        if plan.get("skip"):
+            bits.append(f"{len(plan['skip'])} skipped")
+        note = " · silent" if silent else ""
+        self._redirect(f"/admin/drama/{did}?ok=" + quote(f"Imported {', '.join(bits)}{note}")
+                       + f"#season-{season}")
 
     def _newseason_post(self, admin_id: int, fields: dict):
         did = int(fields.get("drama_id") or 0)
