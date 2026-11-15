@@ -17,6 +17,7 @@ from services import ChannelService
 from tests.conftest import ADMIN, CHANNEL
 from tests.fakes import DUMMY_TOKEN, FakeRequest
 from web import auth as authlib
+from web import html as H
 
 
 class FakeBot:
@@ -347,7 +348,7 @@ def test_add_drama_expands_ep_over_multipart(web):
 def test_redesigned_shell_keeps_contract(web):
     """New sidebar UI: cache-busted assets, nav, empty states; link inputs stay type=text."""
     st, body, _ = web.open("/admin/login")
-    assert "admin.css?v=4" in body and "admin.js?v=4" in body and "Dashboard" not in body
+    assert f"admin.css?v={H.ASSET_V}" in body and f"admin.js?v={H.ASSET_V}" in body and "Dashboard" not in body
     web.login_password()
     _, body, _ = web.open("/admin")
     assert 'id="sidebar"' in body and 'id="menu-btn"' in body and 'aria-current="page"' in body
@@ -401,3 +402,40 @@ def test_request_reply_web_failed_dm(web):
     csrf = web.csrf_from(body)
     st, body, _ = web.open("/admin/request/reply", {"csrf": csrf, "request_id": str(r.id), "text": "  "})
     assert "empty" in body.lower()
+
+
+def test_website_poster_field_add_edit_clear_and_thumb(web):
+    """Website-only poster URL: Add + Edit fields with preview, validation, list thumbnail; Telegram poster untouched."""
+    web.login_password()
+    st, body, _ = web.open("/admin/add")
+    assert 'name="web_poster_url"' in body and "data-wp-prev" in body and "Website poster URL" in body
+    csrf = web.csrf_from(body)
+    web.open("/admin/add", {"csrf": csrf, "title": "Web Poster Show", "status": "Ongoing",
+                            "web_poster_url": "https://img.example/a.jpg?x=1&y=2"}, multipart=True)
+    d = web.db.find_drama("Web Poster Show")
+    assert d and d.web_poster_url == "https://img.example/a.jpg?x=1&y=2" and d.poster is None
+    # list thumbnail: direct <img>, escaped, no referrer, letter fallback underneath
+    _, body, _ = web.open("/admin/dramas")
+    assert 'src="https://img.example/a.jpg?x=1&amp;y=2"' in body and 'referrerpolicy="no-referrer"' in body
+    # edit page shows the field with the current value + preview image
+    _, body, _ = web.open(f"/admin/drama/{d.id}")
+    assert 'name="web_poster_url" value="https://img.example/a.jpg?x=1&amp;y=2"' in body
+    assert re.search(r'class="wp-prev on" data-wp-prev[^>]*><img src="https://img\.example/a\.jpg', body)
+    csrf = web.csrf_from(body)
+    base = {"csrf": csrf, "drama_id": str(d.id), "title": "Web Poster Show", "status": "Ongoing",
+            "genres": "", "synopsis": "", "nextep": "", "air_time": ""}
+    # invalid (javascript:/quotes) is rejected and the old value kept
+    web.open("/admin/drama/edit", {**base, "web_poster_url": 'javascript:alert(1)'})
+    assert web.db.get_drama(d.id).web_poster_url == "https://img.example/a.jpg?x=1&y=2"
+    web.open("/admin/drama/edit", {**base, "web_poster_url": 'https://x.example/"onerror=alert(1)'})
+    assert web.db.get_drama(d.id).web_poster_url == "https://img.example/a.jpg?x=1&y=2"
+    web.open("/admin/drama/edit", {**base, "web_poster_url": "https://img.example/b.png"})
+    assert web.db.get_drama(d.id).web_poster_url == "https://img.example/b.png"
+    web.open("/admin/drama/edit", {**base, "web_poster_url": ""})
+    d = web.db.get_drama(d.id)
+    assert d.web_poster_url is None and d.poster is None
+    # Add rejects a non-http(s) website poster
+    _, body, _ = web.open("/admin/add")
+    web.open("/admin/add", {"csrf": web.csrf_from(body), "title": "Bad WP", "status": "Ongoing",
+                            "web_poster_url": "ftp://x/y.jpg"}, multipart=True)
+    assert web.db.find_drama("Bad WP") is None

@@ -306,3 +306,53 @@ def test_public_posters_env_flag(monkeypatch):
     assert Config().public_posters is True
     monkeypatch.setenv("PUBLIC_POSTERS", "0")
     assert Config().public_posters is False
+
+
+# ---------------- website-only poster URL (browser loads it; server never fetches) ----------------
+def test_web_poster_url_rendered_directly_everywhere(web, tg_files):
+    calls = _wire_get_file(web, tg_files)
+    url = "https://img.example/p.jpg?a=1&b=2"
+    d = web.db.add_drama(title="Web Poster Drama", status="Ongoing", poster="AgACtelegramonly",
+                         web_poster_url=url, episodes={1: [("720p", "https://x/1.mkv", "part")]})
+    plain = web.db.add_drama(title="Plain Tile Drama", status="Ongoing")
+    P.invalidate()
+    esc = "https://img.example/p.jpg?a=1&amp;b=2"
+    home = raw(web, "/")[2]
+    # card + hero tile + hero backdrop: direct <img>, lazy, no referrer, removes itself on error (tile fallback)
+    imgs = re.findall(r'<img[^>]*src="%s"[^>]*>' % re.escape(esc), home)
+    assert len(imgs) >= 3
+    assert all('loading="lazy"' in i and 'referrerpolicy="no-referrer"' in i and "onerror=" in i for i in imgs)
+    assert 'class="hero-bg ph has-img"' in home and 'class="bgimg"' in home
+    page = raw(web, f"/drama/{d.id}")[2]
+    assert re.search(r'class="dbg ph has-img"[^>]*><span>W</span><img class="bgimg" src="%s"' % re.escape(esc), page)
+    assert re.search(r'class="pst dpst"[^>]*><span class="pst-ph"[^>]*>W</span><span class="pst-t">[^<]+</span><img src="%s"' % re.escape(esc), page)
+    # no background-image CSS, no /poster proxy, no Telegram contact
+    assert "background-image" not in page and "/poster/" not in page + home
+    assert calls == [] and tg_files["n"] == 0
+    # search suggestions carry the URL for the client to render
+    r = json.loads(raw(web, "/api/search?q=web+poster")[2])["results"][0]
+    assert r["poster"] == url
+    # a drama without one keeps the gradient tile
+    pp = raw(web, f"/drama/{plain.id}")[2]
+    assert 'class="dbg ph" style="--h:' in pp and "<img" not in pp.split("<main")[1]
+
+
+def test_web_poster_url_rejects_non_http_and_injection(web):
+    bad = ["javascript:alert(1)", "data:image/png;base64,AAA", 'https://x.example/a.jpg" onerror="alert(1)',
+           "https://x.example/a b.jpg", "//x.example/a.jpg", "https://", "ftp://x/y.jpg", "https://x/" + "a" * 1001]
+    for u in bad:
+        assert P.clean_web_poster(u) is None, u
+    assert P.clean_web_poster("  HTTPS://x.example/a.jpg  ") == "HTTPS://x.example/a.jpg"
+    d = web.db.add_drama(title="Evil Poster", status="Ongoing", web_poster_url='javascript:alert(1)')
+    P.invalidate()
+    body = raw(web, f"/drama/{d.id}")[2]
+    assert "javascript:" not in body and 'class="dbg ph" style="--h:' in body
+
+
+def test_web_poster_overrides_telegram_streaming_when_both(web, tg_files, posters_on):
+    calls = _wire_get_file(web, tg_files)
+    d = web.db.add_drama(title="Both Posters", status="Ongoing", poster="AgACboth", web_poster_url="https://img.example/w.jpg")
+    P.invalidate()
+    body = raw(web, f"/drama/{d.id}")[2]
+    assert 'src="https://img.example/w.jpg"' in body and "/poster/" not in body
+    assert raw(web, f"/poster/{d.id}.jpg")[0] == 404 and calls == []

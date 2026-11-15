@@ -190,3 +190,35 @@ function wireQualityButtons(root) {
     }
   });
 })();
+
+// Website poster URL: live thumbnail preview (browser loads the image; the server never fetches it)
+(function () {
+  document.querySelectorAll('[data-wp]').forEach((box) => {
+    const inp = box.querySelector('input[name="web_poster_url"]');
+    const prev = box.querySelector('[data-wp-prev]');
+    const msg = box.querySelector('[data-wp-msg]');
+    const base = msg ? msg.textContent : '';
+    let t;
+    const ok = (u) => /^https?:\/\/[^\s<>"'`\\]+$/i.test(u) && u.length <= 1000;
+    const show = () => {
+      const u = inp.value.trim();
+      prev.classList.remove('on', 'bad');
+      prev.querySelectorAll('img').forEach(i => i.remove());
+      if (msg) msg.textContent = base;
+      if (!u) return;
+      if (!ok(u)) { prev.classList.add('bad'); if (msg) msg.textContent = 'Must start with http:// or https:// (no spaces or quotes).'; return; }
+      const img = new Image();
+      img.alt = ''; img.referrerPolicy = 'no-referrer';
+      img.onload = () => prev.classList.add('on');
+      img.onerror = () => { img.remove(); prev.classList.add('bad'); if (msg) msg.textContent = "Couldn't load that image. Check the link is a direct image URL."; };
+      img.src = u;
+      prev.prepend(img);
+    };
+    inp.addEventListener('input', () => { clearTimeout(t); t = setTimeout(show, 300); });
+    const form = inp.closest('form');
+    form && form.addEventListener('submit', (ev) => {
+      const u = inp.value.trim();
+      if (u && !ok(u)) { ev.preventDefault(); show(); inp.focus(); }
+    });
+  });
+})();

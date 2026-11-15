@@ -20,7 +20,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from . import html as H
 
 log = logging.getLogger(__name__)
-ASSET_V = "6"
+ASSET_V = "7"
 CACHE_TTL = 60.0
 CATALOG_MAX = 3000       # dramas kept in the single cached snapshot (bounded memory)
 SYNOPSIS_MAX = 1500      # chars kept per synopsis
@@ -65,6 +65,9 @@ def slug(s: str) -> str:
 
 def is_http(u: str | None) -> bool:
     return bool(u) and str(u).lower().startswith(("http://", "https://"))
+
+
+from utils import clean_web_poster  # noqa: E402  (website-only poster URL validation)
 
 
 # ---------------------------------------------------------------- catalog snapshot
@@ -125,7 +128,10 @@ def _build(ctx) -> dict:
                    "time": (f"{when:%I:%M %p}".lstrip("0") + " IST") if has_time else ""}
         ref = d["poster"]
         poster = None
-        if not posters_on:
+        web_poster = clean_web_poster(d.get("web_poster_url"))
+        if web_poster:
+            poster = web_poster            # website-only poster: direct <img>, never fetched by us
+        elif not posters_on:
             pass
         elif is_http(ref):
             poster = ref
@@ -136,7 +142,7 @@ def _build(ctx) -> dict:
             "genres": [g.strip() for g in d["genres"].split(",") if g.strip()],
             "synopsis": d["synopsis"][:SYNOPSIS_MAX], "imdb": d["imdb"],
             "audio": d["audio"] or getattr(cfg, "default_audio", ""),
-            "poster": poster, "poster_ref": ref if posters_on else None,
+            "poster": poster, "poster_ref": ref if (posters_on and not web_poster) else None,
             "multi": multi, "cur": cur["n"] if cur else 1,
             "have": have, "total": tot, "next": nxt,
             "latest_at": latest_at, "latest_label": latest_label,
@@ -254,12 +260,21 @@ def poster_img(d, cls: str = "", eager: bool = False) -> str:
     letter = e(initial(d))
     img = ""
     if d["poster"]:
-        img = (f'<img src="{e(d["poster"])}" alt="{e(d["title"])} poster" '
-               f'{"" if eager else "loading=" + chr(34) + "lazy" + chr(34) + " "}decoding="async" '
-               f'onerror="this.remove()">')
+        img = (f'<img src="{e(d["poster"])}" alt="{e(d["title"])} poster" loading="lazy" decoding="async" '
+               f'referrerpolicy="no-referrer" onerror="this.remove()">')
     tile = (f'<span class="pst-ph" aria-hidden="true">{letter}</span>'
             f'<span class="pst-t">{e(d["title"])}</span>')
     return f'<div class="pst {cls}" style="--h:{hue(d)}">{tile}{img}</div>'
+
+
+def backdrop(d, cls: str) -> str:
+    """Gradient backdrop; with a poster, a blurred <img> on top that removes itself if it fails to load."""
+    img = ""
+    if d["poster"]:
+        img = (f'<img class="bgimg" src="{e(d["poster"])}" alt="" loading="lazy" decoding="async" '
+               f'referrerpolicy="no-referrer" onerror="this.parentNode.classList.remove(\'has-img\');this.remove()">')
+    return (f'<div class="{cls} ph{" has-img" if img else ""}" style="--h:{hue(d)}">'
+            f'<span>{e(initial(d))}</span>{img}</div>')
 
 
 def drama_url(d) -> str:
@@ -391,7 +406,7 @@ def home(ctx, status: str = "", host: str = "") -> str:
         meta = "".join(f'<span class="hmeta-i">{x}</span>' for x in [
             e(str(d["year"])) if d["year"] else "", f'{ic("star")}{e(d["imdb"])}' if d["imdb"] else "",
             e(progress(d))] if x) + nxt
-        bg = f'<div class="hero-bg" style="background-image:url({css_url(d["poster"])})"></div>' if d["poster"] else f'<div class="hero-bg ph" style="--h:{hue(d)}"><span>{e(initial(d))}</span></div>'
+        bg = backdrop(d, "hero-bg")
         slides.append(f"""
         <article class="slide{' on' if i == 0 else ''}" data-slide="{i}">
           {bg}<div class="hero-shade"></div>
@@ -559,8 +574,7 @@ def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None,
     if d["next"]:
         nxt = (f'<div class="next">{ic("cal")}<div><span>Next episode · EP {d["next"]["ep"]}</span>'
                f'<b>{e(d["next"]["date"])}</b>{"<small>" + e(d["next"]["time"]) + "</small>" if d["next"]["time"] else ""}</div></div>')
-    bg = (f'<div class="dbg" style="background-image:url({css_url(d["poster"])})"></div>' if d["poster"]
-          else f'<div class="dbg ph" style="--h:{hue(d)}"><span>{e(initial(d))}</span></div>')
+    bg = backdrop(d, "dbg")
     first = eps[0] if eps else None
     body = f"""
     <section class="dhero">{bg}<div class="dshade"></div>

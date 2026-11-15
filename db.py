@@ -33,6 +33,7 @@ class Drama(Base):
     air_days: Mapped[str | None] = mapped_column(String(20))  # weekday numbers Mon=0, e.g. "5,6"
     air_time: Mapped[str | None] = mapped_column(String(5))   # "HH:MM" local (IST)
     next_ep_date: Mapped[str | None] = mapped_column(String(10))  # "YYYY-MM-DD" override; cleared on /addep
+    web_poster_url: Mapped[str | None] = mapped_column(String(1000))  # public website poster (http(s) URL), separate from Telegram poster
     deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -230,7 +231,8 @@ class Database:
             with self.engine.begin() as c:
                 c.execute(text("ALTER TABLE dramas ADD COLUMN poster_msg_id INTEGER"))
         for col, typ in (("audio", "VARCHAR(100)"), ("imdb", "VARCHAR(10)"),
-                         ("air_days", "VARCHAR(20)"), ("air_time", "VARCHAR(5)"), ("next_ep_date", "VARCHAR(10)")):
+                         ("air_days", "VARCHAR(20)"), ("air_time", "VARCHAR(5)"), ("next_ep_date", "VARCHAR(10)"),
+                         ("web_poster_url", "VARCHAR(1000)")):
             if col not in cols:
                 with self.engine.begin() as c:
                     c.execute(text(f"ALTER TABLE dramas ADD COLUMN {col} {typ}"))
@@ -550,7 +552,7 @@ class Database:
             drows = s.execute(
                 select(Drama.id, Drama.title, Drama.poster, func.substr(Drama.synopsis, 1, synopsis_max),
                        Drama.genres, Drama.year, Drama.status, Drama.total_episodes, Drama.audio, Drama.imdb,
-                       Drama.air_time, Drama.next_ep_date, Drama.updated_at)
+                       Drama.air_time, Drama.next_ep_date, Drama.updated_at, Drama.web_poster_url)
                 .where(alive).order_by(Drama.updated_at.desc()).limit(limit)).all()
             ids = [r[0] for r in drows]
             if not ids:
@@ -579,13 +581,13 @@ class Database:
         for did, num, st, tot, n, mx in srows:
             seasons.setdefault(did, []).append({"n": num, "status": st, "total": tot, "eps": n or 0, "max": mx or 0})
         out = []
-        for (did, title, poster, syn, genres, year, status, total, audio, imdb, air_time, nxt, upd) in drows:
+        for (did, title, poster, syn, genres, year, status, total, audio, imdb, air_time, nxt, upd, wp) in drows:
             n, mx = drows_eps.get(did, (0, 0))
             out.append({"id": did, "title": title, "poster": poster, "synopsis": syn or "", "genres": genres or "",
                         "year": year, "status": status, "total_episodes": total, "audio": audio, "imdb": imdb,
                         "air_time": air_time, "next_ep_date": nxt, "updated_at": upd,
                         "seasons": seasons.get(did, []), "episodes": n or 0, "max_ep": mx or 0,
-                        "latest": latest.get(did)})
+                        "latest": latest.get(did), "web_poster_url": wp})
         return out
 
     def stats(self, since: datetime) -> dict:

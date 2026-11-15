@@ -186,3 +186,21 @@ def countdown_text(when, now) -> str:
     n = (when.date() - now.astimezone(when.tzinfo).date()).days
     rel = "today" if n == 0 else "tomorrow" if n == 1 else f"in {n} days"
     return rel
+
+
+from urllib.parse import urlsplit as _urlsplit
+
+_URL_BAD = re.compile(r"[\s<>\"'`\\\x00-\x1f\x7f]")
+
+
+def clean_web_poster(u: str | None) -> str | None:
+    """Admin-given website poster URL: http(s) only, no whitespace/quotes/control chars, <= 1000 chars.
+    The browser loads it directly; the server never fetches it."""
+    u = (u or "").strip()
+    if not u or len(u) > 1000 or not u.lower().startswith(("http://", "https://")) or _URL_BAD.search(u):
+        return None
+    try:
+        parts = _urlsplit(u)
+    except ValueError:
+        return None
+    return u if parts.scheme in ("http", "https") and parts.netloc else None

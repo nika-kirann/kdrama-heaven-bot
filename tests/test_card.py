@@ -92,3 +92,23 @@ async def test_edit_audio_and_imdb(env):
     assert d.audio == "Korean, Hindi Dub" and d.imdb == "8.4"
     await env.send(msg_update(f"/edit {d.id} imdb eleven", ADMIN))
     assert "rating like" in env.req.of("sendMessage")[-1]["text"]
+
+
+async def test_edit_webposter_set_and_clear(env):
+    from tests.test_quality import wizard
+    d = await wizard(env)
+    tg_poster = env.db.get_drama(d.id).poster
+    edits = len(env.req.of("editMessageCaption")) + len(env.req.of("editMessageMedia")) + len(env.req.of("editMessageText"))
+    await env.send(msg_update(f"/edit {d.id} webposter https://img.example/p.jpg", ADMIN))
+    d2 = env.db.get_drama(d.id)
+    assert d2.web_poster_url == "https://img.example/p.jpg" and d2.poster == tg_poster
+    assert "Website poster set" in env.req.of("sendMessage")[-1]["text"]
+    await env.send(msg_update(f"/edit {d.id} webposter javascript:alert(1)", ADMIN))
+    assert "http(s)" in env.req.of("sendMessage")[-1]["text"]
+    assert env.db.get_drama(d.id).web_poster_url == "https://img.example/p.jpg"
+    await env.send(msg_update(f"/edit {d.id} webposter clear", ADMIN))
+    assert env.db.get_drama(d.id).web_poster_url is None and env.db.get_drama(d.id).poster == tg_poster
+    # website-only: the channel card is never edited
+    assert len(env.req.of("editMessageCaption")) + len(env.req.of("editMessageMedia")) + len(env.req.of("editMessageText")) == edits
+    await env.send(msg_update("/edit", ADMIN))
+    assert "webposter" in env.req.of("sendMessage")[-1]["text"]

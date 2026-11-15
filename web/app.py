@@ -19,6 +19,22 @@ from . import html as H
 from . import public as P
 from .forms import add_drama_links_section, add_episode_form, expand_quality_range
 
+WEB_POSTER_ERR = "Website poster must be a plain http(s) image URL"
+
+
+def web_poster_field(value: str | None = None) -> str:
+    """'Website poster URL' input with a live thumbnail preview (admin.js). Website only; Telegram poster unchanged."""
+    v = H.e(value or "")
+    img = (f'<img src="{v}" alt="" referrerpolicy="no-referrer">' if value else "")
+    return f"""<div class="wp-field" data-wp>
+              <div class="wp-in"><label for="wp-url">Website poster URL <span class="muted">(website only)</span></label>
+                <input id="wp-url" name="web_poster_url" value="{v}" inputmode="url" autocomplete="off" spellcheck="false"
+                  placeholder="https://… image link for the public site">
+                <p class="hint muted sm" data-wp-msg>Shown on the public website only. The Telegram poster stays as it is.
+                  Leave blank for the gradient title tile.</p></div>
+              <div class="wp-prev{' on' if value else ''}" data-wp-prev aria-label="Preview">{img}<span>Preview</span></div>
+            </div>"""
+
 log = logging.getLogger(__name__)
 STARTED = time.time()
 ROOT = Path(__file__).resolve().parent
@@ -613,9 +629,14 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _thumb(d, cls: str = "thumb") -> str:
-        if d.poster and str(d.poster).startswith("http"):
-            return f'<img class="{cls}" src="{H.e(d.poster)}" alt="" loading="lazy">'
         letter = H.e((d.title or "?").strip()[:1].upper())
+        src = P.clean_web_poster(getattr(d, "web_poster_url", None))
+        if not src and d.poster and str(d.poster).startswith("http"):
+            src = d.poster
+        if src:
+            # browser loads it directly; if it fails, swap in the letter tile
+            return (f'<span class="{cls} ph thumb-wrap"><span>{letter}</span><img class="thumb-img" src="{H.e(src)}" alt="" '
+                    f'loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()"></span>')
         return f'<div class="{cls} ph">{letter}</div>'
 
     @staticmethod
@@ -814,9 +835,10 @@ class AdminHandler(BaseHTTPRequestHandler):
             </div></div>
             <div class="fieldset"><div class="fs-title">Poster</div>
             <div class="row">
-              <div><label>Poster URL</label><input name="poster_url" value="" placeholder="https://… or leave blank"></div>
-              <div><label>Poster file</label><input type="file" name="poster_file" accept="image/*"></div>
-            </div></div>
+              <div><label>Telegram poster URL</label><input name="poster_url" value="" placeholder="https://… or leave blank"></div>
+              <div><label>Telegram poster file</label><input type="file" name="poster_file" accept="image/*"></div>
+            </div>
+            {web_poster_field(d.web_poster_url)}</div>
             <div class="form-foot"><button class="btn" type="submit">{H.icon('save')}Save changes</button></div>
           </form>
         </details>
@@ -862,11 +884,12 @@ class AdminHandler(BaseHTTPRequestHandler):
           </div>
           <div class="card">
             <div class="card-head"><div class="card-ic pink">{H.icon('image')}</div>
-              <div><h2>Poster</h2><p class="muted">Paste a URL or upload an image</p></div></div>
+              <div><h2>Poster</h2><p class="muted">Telegram poster for the channel card, plus an optional website-only poster</p></div></div>
             <div class="row">
-              <div><label>Poster URL</label><input name="poster_url" placeholder="https://…"></div>
-              <div><label>Poster file</label><input type="file" name="poster_file" accept="image/*"></div>
+              <div><label>Telegram poster URL</label><input name="poster_url" placeholder="https://…"></div>
+              <div><label>Telegram poster file</label><input type="file" name="poster_file" accept="image/*"></div>
             </div>
+            {web_poster_field()}
           </div>
           <div class="card">
             <div class="card-head"><div class="card-ic gold">{H.icon('link')}</div>
@@ -1052,6 +1075,10 @@ class AdminHandler(BaseHTTPRequestHandler):
         total = _field(fields, "total").strip()
         if total.isdigit():
             kw["total_episodes"] = int(total)
+        wp_raw = _field(fields, "web_poster_url").strip()
+        if wp_raw and not P.clean_web_poster(wp_raw):
+            return self._redirect("/admin/add?err=" + quote(WEB_POSTER_ERR))
+        kw["web_poster_url"] = P.clean_web_poster(wp_raw)
         poster = _field(fields, "poster_url").strip() or None
         if files.get("poster_file") and files["poster_file"][1]:
             poster = self._upload_poster_bytes(files["poster_file"][0], files["poster_file"][1]) or poster
@@ -1125,6 +1152,12 @@ class AdminHandler(BaseHTTPRequestHandler):
         total = (fields.get("total") or "").strip()
         if total.isdigit() and d.current:
             db.update_season(d.id, d.current.number, total_episodes=int(total))
+        if "web_poster_url" in fields:          # website-only poster; blank clears it
+            wp_raw = (fields.get("web_poster_url") or "").strip()
+            if wp_raw and not P.clean_web_poster(wp_raw):
+                from urllib.parse import quote
+                return self._redirect(f"/admin/drama/{d.id}?err=" + quote(WEB_POSTER_ERR))
+            changes["web_poster_url"] = P.clean_web_poster(wp_raw)
         poster = (fields.get("poster_url") or "").strip()
         if files.get("poster_file") and files["poster_file"][1]:
             poster = self._upload_poster_bytes(files["poster_file"][0], files["poster_file"][1]) or poster

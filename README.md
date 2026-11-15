@@ -43,7 +43,7 @@ An all-in-one Telegram bot for running the **kdrama_heaven** channel: drama card
   - Links are grouped by **quality** (see "Episode link format" below).
 - `/addep <title|id>`: add episodes (numbering continues after the last episode; start with an `EP n` line to add or replace a quality on an existing episode). The channel post is edited in place and a "New episodes" notice is posted. You can also put the links on the lines after the command.
 - `/complete <title|id>`: switches the badge to COMPLETED ✅ and announces it.
-- `/edit <id> <field> <value>`: fields are title, synopsis, genres, year, poster, total, status, `repost`, `links` (links on the following lines, e.g. `EP 5` then `1080p: https://…`; this replaces only the qualities you give), or `quality <old> <new>` (rename, e.g. `/edit 3 quality 520p 720p`; use `-` as the new name to remove a quality).
+- `/edit <id> <field> <value>`: fields are title, synopsis, genres, year, poster, webposter, total, status, `repost`, `links` (links on the following lines, e.g. `EP 5` then `1080p: https://…`; this replaces only the qualities you give), or `quality <old> <new>` (rename, e.g. `/edit 3 quality 520p 720p`; use `-` as the new name to remove a quality).
 - `/delete <title|id>`: deletes the drama and its channel post.
 - `/list` (paginated), `/stats`
 - `/schedule <title|id|-> YYYY-MM-DD HH:MM <text>`: times are IST. Related: `/schedules`, `/unschedule <id>`.
@@ -92,6 +92,7 @@ New posts and `/edit <id> repost` use the aesthetic card (see `samples/`): title
 - `DEFAULT_AUDIO` (default `Korean, Eng Sub`) and `BRAND` (footer handle, defaults to `CHANNEL_ID` if it's an @username, otherwise `@kdrama_heaven`) are optional env vars.
 - `/add` has an optional **Audio** step after Year: `Korean, Eng Sub | 8.2` sets audio and IMDb (or /skip).
 - `/edit <id> audio Korean, Hindi Dub` and `/edit <id> imdb 8.4` (`-` clears it).
+- `/edit <id> webposter https://…/poster.jpg` sets a **website-only** poster (`/edit <id> webposter clear` removes it). The Telegram poster and channel card don't change.
 - Existing posts keep their old look until edited or reposted.
 
 ## Private browsing
@@ -102,9 +103,16 @@ Channel post keyboards are shared by everyone, so the channel card only ever sho
 The same web process (same `PORT`) serves a read-only catalog for viewers: `/` (home: featured hero, latest updates, ongoing, completed),
 `/search?q=` (+ live suggestions from `/api/search`, rate-limited per IP), and `/drama/<id>` (seasons, episode grid,
 480p/720p/1080p buttons with Part/Mirror). Quality buttons go through `/go/<link_id>`, which logs a click like the bot does and
-redirects to the stored URL. Anything that isn't an http(s) URL opens the bot instead (`?start=drama_<id>`). **Posters are off by default** (`PUBLIC_POSTERS=0`), so the site never touches poster
-images: every drama gets a title tile instead, with its own purple gradient, a big initial and the title, and the home banner and drama
-page use matching gradient backdrops. With `PUBLIC_POSTERS=1`, Telegram file_id posters are **streamed** from `/poster/<id>.jpg` in
+redirects to the stored URL. Anything that isn't an http(s) URL opens the bot instead (`?start=drama_<id>`). **Website posters are separate from Telegram posters.** Give a drama a `web_poster_url` (admin Add or Edit details:
+"Website poster URL", with a live preview; or `/edit <id> webposter <url>`). The site then renders `<img src="that URL">` directly
+(`loading="lazy"`, `referrerpolicy="no-referrer"`) on cards, the hero, the drama backdrop and search suggestions. Only http(s) URLs
+without spaces or quotes are accepted, output is HTML-escaped, and **the server never downloads the image**, so it costs no server memory.
+If the image fails to load, or no URL is set, the gradient title tile shows instead. Use a direct image link (for example a
+public image host); the visitor's browser fetches it.
+
+Telegram posters are **off by default** on the site (`PUBLIC_POSTERS=0`), so the server never touches Telegram poster
+images. A drama without a website poster gets a title tile, with its own purple gradient, a big initial and the title, and the home banner and drama
+page use matching gradient backdrops. A website poster URL always takes priority. With `PUBLIC_POSTERS=1`, Telegram file_id posters are **streamed** from `/poster/<id>.jpg` in
 32 KB chunks. They are never stored in RAM or on disk, and the token never reaches the browser. The only thing remembered is a small file_id → file path map
 (at most 200 entries, 30 min TTL), and responses carry `Cache-Control: public, max-age=604800, immutable` plus an ETag.
 The catalog index is cached for 60 s (capped at 3000 dramas, card fields only) and refreshed on admin edits. It is built from plain

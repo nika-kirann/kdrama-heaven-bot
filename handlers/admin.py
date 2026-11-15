@@ -6,11 +6,20 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Mes
 
 import jobs
 import keyboards as kb
-from utils import URL_RE, describe_links, h, local_midnight_utc, norm_quality, parse_local_dt, parse_quality_links
+from utils import URL_RE, clean_web_poster, describe_links, h, local_midnight_utc, norm_quality, parse_local_dt, parse_quality_links
 from .common import admin_only, is_admin, arg_text, deps
 
 log = logging.getLogger(__name__)
-EDIT_FIELDS = {"title", "synopsis", "genres", "year", "poster", "total", "status", "repost", "links", "quality", "audio", "imdb", "nextep"}
+
+
+def _invalidate_site():
+    """Drop the public site's 60 s catalog snapshot so a website-poster change shows up now."""
+    try:
+        from web import public as P
+        P.invalidate()
+    except Exception:
+        pass
+EDIT_FIELDS = {"title", "synopsis", "genres", "year", "poster", "total", "status", "repost", "links", "quality", "audio", "imdb", "nextep", "webposter"}
 
 
 def _parse_season_ref(text: str):
@@ -88,8 +97,9 @@ async def edit(update: Update, context):
         parts = args.split(maxsplit=2)
         if len(parts) < 2 or not parts[0].isdigit() or parts[1].lower() not in EDIT_FIELDS:
             return await msg.reply_text(
-                "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, total, status, audio, imdb, nextep, repost, links, quality\n"
+                "Usage: /edit <id> <field> <value>\nFields: title, synopsis, genres, year, poster, webposter, total, status, audio, imdb, nextep, repost, links, quality\n"
                 "/edit 3 s2 total 16   (season-specific total)\n"
+                "/edit 3 webposter https://…/poster.jpg   (website-only poster; /edit 3 webposter clear removes it)\n"
                 "/edit 3 nextep 2026-11-11 [20:00]   (next-episode date, optional IST time; cleared on /addep|/newseason; - to clear)\n"
                 "Examples:\n/edit 3 year 2024\n"
                 "/edit 3 poster: send a photo with that caption, reply to a photo with it, add an https URL, "
@@ -117,6 +127,20 @@ async def edit(update: Update, context):
         return await msg.reply_text(f"✏️ Updated Season {season_edit} {field} for {d.title}; channel post edited.")
     if field == "poster":
         return await edit_poster(update, context, d, value)
+    if field == "webposter":
+        # website-only poster URL: the Telegram poster and channel card are not touched
+        if value.lower() in {"clear", "-", "none", "off"}:
+            db.update_drama(d.id, web_poster_url=None)
+            _invalidate_site()
+            return await msg.reply_text(f"🖼 Removed the website poster for {d.title}. The site shows its gradient tile.")
+        url = clean_web_poster(value)
+        if not url:
+            return await msg.reply_text("Usage: /edit <id> webposter https://…/image.jpg   (or: /edit <id> webposter clear)\n"
+                                        "Must be a plain http(s) image link.")
+        db.update_drama(d.id, web_poster_url=url)
+        _invalidate_site()
+        return await msg.reply_text(f"🖼 Website poster set for {d.title}. The Telegram poster is unchanged.",
+                                    disable_web_page_preview=True)
     if field == "links":
         try:
             eps = parse_quality_links(value, None, start=1)
@@ -491,6 +515,7 @@ async def admin_help(update: Update, context):
         "/add — new drama wizard\n/addep &lt;drama&gt; [sN] — add episodes\n"
         "/newseason &lt;drama&gt; [total_eps]\n/complete &lt;drama&gt; [sN]\n"
         "/edit &lt;id&gt; &lt;field&gt; &lt;value&gt;  (also: /edit &lt;id&gt; sN total 16)\n"
+        "/edit &lt;id&gt; webposter &lt;url&gt;|clear — website-only poster\n"
         "/delete &lt;drama&gt; [sN]\n/list\n/stats\n/reports — open viewer reports\n"
         "/schedule &lt;drama|-&gt; YYYY-MM-DD HH:MM &lt;text&gt;\n/schedules, /unschedule &lt;id&gt;\n"
         "/requests — open drama requests\n/reply &lt;request_id&gt; &lt;text&gt; — DM a requester\n"
