@@ -1,9 +1,10 @@
 """Tiny HTML helpers and page chrome for the admin UI."""
 from __future__ import annotations
 
+import json
 import html as _h
 
-ASSET_V = "5"
+ASSET_V = "6"
 
 _FONT = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
          '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
@@ -77,6 +78,221 @@ def page_head(title: str, subtitle: str = "", actions: str = "", *, back: str = 
 def stat_card(label: str, value, ic: str, tone: str = "purple") -> str:
     return (f'<div class="stat tone-{tone}"><div class="stat-ic">{icon(ic)}</div>'
             f'<div class="stat-body"><div class="n">{e(value)}</div><div class="l">{e(label)}</div></div></div>')
+
+
+def sparkline_svg(values, w: int = 120, h: int = 36, cls: str = "spark") -> str:
+    """Tiny inline SVG area+line chart. values are non-negative ints."""
+    vals = [max(0, int(v or 0)) for v in (values or [0])] or [0]
+    mx = max(vals + [1])
+    n = len(vals)
+    pts = []
+    for i, v in enumerate(vals):
+        x = 0 if n == 1 else i * w / (n - 1)
+        y = h - 2 - (v / mx) * (h - 4)
+        pts.append((x, y))
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    area = f"0,{h} " + line + f" {w},{h}"
+    return (f'<svg class="{e(cls)}" viewBox="0 0 {w} {h}" width="{w}" height="{h}" '
+            f'preserveAspectRatio="none" aria-hidden="true">'
+            f'<polygon class="spark-fill" points="{area}"/>'
+            f'<polyline class="spark-line" fill="none" points="{line}"/></svg>')
+
+
+def bar_chart_svg(days: list, values: list, w: int = 640, h: int = 148) -> str:
+    """30-day bar chart with first/mid/last date labels and hover titles."""
+    vals = [max(0, int(v or 0)) for v in (values or [])]
+    labels = list(days or [])
+    n = max(len(vals), 1)
+    if len(vals) < n:
+        vals += [0] * (n - len(vals))
+    if len(labels) < n:
+        labels += [""] * (n - len(labels))
+    mx = max(vals + [1])
+    pad_t, pad_b, pad_x = 8, 22, 2
+    inner_h = h - pad_t - pad_b
+    gap = 2.0
+    bw = max(1.4, (w - 2 * pad_x - gap * (n - 1)) / n)
+    bars = []
+    for i, (day, v) in enumerate(zip(labels, vals)):
+        x = pad_x + i * (bw + gap)
+        bh = (v / mx) * inner_h if mx else 0
+        y = pad_t + inner_h - bh
+        cls = "on" if v else "empty"
+        if v:
+            ht = max(bh, 1.5)
+        else:
+            y, ht, cls = pad_t + inner_h - 1.2, 1.2, "empty"
+        bars.append(
+            f'<rect class="{cls}" x="{x:.2f}" y="{y:.2f}" width="{bw:.2f}" height="{ht:.2f}" rx="1.4">'
+            f'<title>{e(day)}: {v}</title></rect>'
+        )
+
+    def lab(i):
+        if not labels[i]:
+            return ""
+        x = pad_x + i * (bw + gap) + bw / 2
+        anchor = "start" if i == 0 else ("end" if i == n - 1 else "middle")
+        return f'<text class="bar-lab" x="{x:.1f}" y="{h - 6}" text-anchor="{anchor}">{e(labels[i][5:])}</text>'
+
+    mid = n // 2
+    labels_svg = lab(0) + lab(mid) + lab(n - 1)
+    return (f'<svg class="bars" viewBox="0 0 {w} {h}" width="100%" height="{h}" '
+            f'preserveAspectRatio="none" role="img" aria-label="Activity last 30 days">'
+            f'{"".join(bars)}{labels_svg}</svg>')
+
+
+def _delta_html(n, period: str = "7d") -> str:
+    n = int(n or 0)
+    cls = "up" if n > 0 else ("down" if n < 0 else "zero")
+    sign = f"+{n}" if n > 0 else str(n)
+    return f'<div class="stat-delta {cls}">{sign} · {e(period)}</div>'
+
+
+def live_stat_card(key: str, label: str, value, ic: str, tone: str, *,
+                   delta=None, spark=None, sub: str | None = None) -> str:
+    spark_html = (f'<div class="stat-spark" data-spark="{e(key)}">{sparkline_svg(spark)}</div>'
+                  if spark is not None else "")
+    sub_html = f'<div class="stat-sub" data-sub="{e(key)}">{e(sub)}</div>' if sub else ""
+    delta_html = _delta_html(delta) if delta is not None else ""
+    return (
+        f'<div class="stat tone-{e(tone)}" data-stat="{e(key)}">'
+        f'<div class="stat-top"><div class="stat-ic">{icon(ic)}</div>'
+        f'<div class="stat-body"><div class="n" data-n="{e(key)}">{e(value)}</div>'
+        f'<div class="l">{e(label)}</div>{sub_html}{delta_html}</div></div>'
+        f'{spark_html}</div>'
+    )
+
+
+def _rank_list(rows: list, count_key: str, empty: str) -> str:
+    if not rows:
+        return f'<p class="muted sm empty-mini">{e(empty)}</p>'
+    mx = max(int(r.get(count_key) or 0) for r in rows) or 1
+    items = []
+    for i, r in enumerate(rows, 1):
+        n = int(r.get(count_key) or 0)
+        pct = max(4, int(n * 100 / mx))
+        title = e(r.get("title") or r.get("quality") or "—")
+        hid = r.get("id")
+        label = f'<a href="/admin/drama/{int(hid)}">{title}</a>' if hid else f'<span>{title}</span>'
+        items.append(
+            f'<li><span class="rank-i">{i}</span><div class="rank-body">{label}'
+            f'<i class="rank-bar" style="width:{pct}%"></i></div>'
+            f'<span class="rank-n">{n}</span></li>'
+        )
+    return f'<ol class="rank-list">{"".join(items)}</ol>'
+
+
+def _upcoming_list(rows: list) -> str:
+    if not rows:
+        return '<p class="muted sm empty-mini">No upcoming episode dates set.</p>'
+    items = []
+    for r in rows:
+        ep = f"S{r['season']} Ep {r['episode']}" if r.get("season") else f"Ep {r['episode']}"
+        extra = f" · {e(r['time'])}" if r.get("time") else ""
+        items.append(
+            f'<li><a href="/admin/drama/{int(r["id"])}"><b>{e(r["title"])}</b></a>'
+            f'<div class="muted sm">{e(ep)} · {e(r["date"])}{extra}</div></li>'
+        )
+    return f'<ul class="air-list">{"".join(items)}</ul>'
+
+
+def _period_pills(deltas: dict, metric: str) -> str:
+    bits = []
+    for key, label in (("24h", "24h"), ("7d", "7d"), ("30d", "30d")):
+        n = int((deltas.get(key) or {}).get(metric) or 0)
+        sign = f"+{n}" if n > 0 else str(n)
+        bits.append(f'<span class="period-pill" data-period="{key}"><b>{sign}</b> {label}</span>')
+    return "".join(bits)
+
+
+_ACTIVITY_METRICS = (
+    ("clicks", "Clicks"),
+    ("users", "New users"),
+    ("episodes", "Episodes added"),
+    ("requests", "Requests"),
+    ("reports", "Reports"),
+)
+
+
+def live_stats_section(data: dict) -> str:
+    """Full Live stats dashboard block. Server-rendered; JS refreshes from /admin/api/stats."""
+    t, dlt, series = data["totals"], data["deltas"], data["series"]
+    d7 = dlt.get("7d") or {}
+    req_sub = f"{t['requests_open']} pending · {t['requests_replied']} replied"
+    user_sub = f"{t['users_started']} started"
+    if t["users_blocked"]:
+        user_sub += f" · {t['users_blocked']} blocked"
+    cards = "".join([
+        live_stat_card("dramas", "Dramas", t["dramas"], "film", "purple",
+                       delta=d7.get("dramas"), spark=series.get("dramas")),
+        live_stat_card("ongoing", "Ongoing", t["ongoing"], "play", "violet"),
+        live_stat_card("completed", "Completed", t["completed"], "check-circle", "green"),
+        live_stat_card("episodes", "Episodes", t["episodes"], "tv", "pink",
+                       delta=d7.get("episodes"), spark=series.get("episodes")),
+        live_stat_card("users", "Users", t["users"], "user", "blue",
+                       delta=d7.get("users"), spark=series.get("users"), sub=user_sub),
+        live_stat_card("requests", "Requests", t["requests"], "inbox", "gold",
+                       delta=d7.get("requests"), spark=series.get("requests"), sub=req_sub),
+        live_stat_card("reports_open", "Open reports", t["reports_open"], "flag",
+                       "red" if t["reports_open"] else "slate",
+                       delta=d7.get("reports"), spark=series.get("reports")),
+        live_stat_card("clicks", "Clicks", t["clicks"], "bolt", "cyan",
+                       delta=d7.get("clicks"), spark=series.get("clicks")),
+    ])
+    default = "clicks"
+    best = -1
+    for key, _ in _ACTIVITY_METRICS:
+        s = sum(series.get(key) or [])
+        if s > best:
+            best, default = s, key
+    tabs = "".join(
+        f'<button type="button" class="act-tab{" on" if key == default else ""}" data-metric="{key}">{label}</button>'
+        for key, label in _ACTIVITY_METRICS
+    )
+    chart = bar_chart_svg(series["days"], series.get(default) or [])
+    periods = _period_pills(dlt, default)
+    payload = json.dumps(data, ensure_ascii=True, separators=(",", ":"))
+    posts = t.get("posts_today", 0)
+    sched = t.get("pending_schedules", 0)
+    follows = t.get("follows", 0)
+    extra = (f'<div class="live-extra muted sm">'
+             f'<span>Posts today <b>{posts}</b></span>'
+             f'<span>Follows <b>{follows}</b></span>'
+             f'<span>Pending schedules <b>{sched}</b></span></div>')
+    tz = e(data.get("tz") or "")
+    return (
+        f'<section class="live-stats" id="live-stats" data-default-metric="{e(default)}">'
+        f'<div class="live-head"><div class="live-title">'
+        f'<span class="live-pulse" title="Live" aria-hidden="true"><i></i></span>'
+        f'<h2>Live stats</h2>'
+        f'<span class="live-ago" data-live-updated>Updated just now</span></div>'
+        f'<p class="muted sm">Totals, {tz} activity and what’s airing next. Refreshes every 30 seconds.</p></div>'
+        f'<div class="stats">{cards}</div>'
+        f'<div class="live-grid">'
+        f'<div class="card" data-activity>'
+        f'<div class="card-head between"><div class="card-head-l"><div class="card-ic">{icon("calendar")}</div>'
+        f'<div><h2>Activity</h2><p class="muted">Last 30 days</p></div></div>'
+        f'<div class="period-row" data-periods>{periods}</div></div>'
+        f'<div class="act-tabs" role="tablist">{tabs}</div>'
+        f'<div class="bar-wrap" data-chart>{chart}</div>{extra}</div>'
+        f'<div class="card"><div class="card-head"><div class="card-ic gold">{icon("clock")}</div>'
+        f'<div><h2>Upcoming episodes</h2><p class="muted">Next air date · full date, not a countdown</p></div></div>'
+        f'<div data-upcoming>{_upcoming_list(data.get("upcoming") or [])}</div></div></div>'
+        f'<div class="live-grid three">'
+        f'<div class="card"><div class="card-head"><div class="card-ic pink">{icon("bolt")}</div>'
+        f'<div><h2>Top clicked</h2><p class="muted">Last 7 days</p></div></div>'
+        f'<div data-top-clicked>{_rank_list(data.get("top_clicked_7d") or [], "clicks", "No clicks in the last 7 days.")}</div></div>'
+        f'<div class="card"><div class="card-head"><div class="card-ic">{icon("star")}</div>'
+        f'<div><h2>Most followed</h2><p class="muted">All time</p></div></div>'
+        f'<div data-top-followed>{_rank_list(data.get("top_followed") or [], "followers", "No followers yet.")}</div></div>'
+        f'<div class="card"><div class="card-head"><div class="card-ic blue">{icon("tv")}</div>'
+        f'<div><h2>Quality clicks</h2><p class="muted">Last 7 days</p></div></div>'
+        f'<div data-top-qualities>{_rank_list(data.get("top_qualities_7d") or [], "clicks", "No quality clicks in the last 7 days.")}</div></div>'
+        f'</div>'
+        f'<script type="application/json" id="live-stats-data">{payload}</script>'
+        f'</section>'
+    )
+
 
 
 def empty_state(ic: str, title: str, text: str = "", action: str = "") -> str:

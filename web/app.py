@@ -249,6 +249,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         routes = {
             "/admin": self._dashboard,
             "/admin/": self._dashboard,
+            "/admin/api/stats": self._live_stats_api,
             "/admin/dramas": self._dramas,
             "/admin/add": self._add_get,
             "/admin/reports": self._reports,
@@ -551,22 +552,14 @@ class AdminHandler(BaseHTTPRequestHandler):
     def _csrf(self, admin_id: int) -> str:
         return f'<input type="hidden" name="csrf" value="{H.e(authlib.csrf_token(get_auth(), admin_id))}">'
 
+    def _live_stats_api(self, admin_id: int):
+        self._json(200, _CTX["db"].cached_live_stats(_CTX["cfg"].tz))
+
     def _dashboard(self, admin_id: int):
-        db, svc = _CTX["db"], _CTX["svc"]
-        from utils import local_midnight_utc
-        s = db.stats(local_midnight_utc(_CTX["cfg"].tz))
+        db = _CTX["db"]
+        live = db.cached_live_stats(_CTX["cfg"].tz)
         open_n, open_rows = db.open_reports(5)
         recent, _ = db.list_dramas(limit=6, order="latest")
-        stats = "".join([
-            H.stat_card("Dramas", s['dramas'], "film", "purple"),
-            H.stat_card("Ongoing", s['ongoing'], "play", "violet"),
-            H.stat_card("Completed", s['completed'], "check-circle", "green"),
-            H.stat_card("Seasons", s.get('seasons', 0), "layers", "blue"),
-            H.stat_card("Episodes", s['episodes'], "tv", "pink"),
-            H.stat_card("Open reports", open_n, "flag", "red" if open_n else "slate"),
-            H.stat_card("Requests", s['requests'], "inbox", "gold"),
-            H.stat_card("Posts today", s['posts_today'], "send", "cyan"),
-        ])
         recent_rows = "".join(
             f"<tr data-href='/admin/drama/{d.id}'><td><div class='cell-title'>{self._thumb(d)}"
             f"<div><a href='/admin/drama/{d.id}'><b>{H.e(d.title)}</b></a>"
@@ -593,7 +586,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                    f"<a class='btn' href='/admin/add'>{H.icon('plus')}Add drama</a>")
         body = f"""
         {H.page_head("Dashboard", "Quick look at kdrama_heaven — your channel at a glance.", actions)}
-        <div class="stats">{stats}</div>
+        {H.live_stats_section(live)}
         <div class="grid-2">
           <div class="card">
             <div class="card-head between"><div class="card-head-l"><div class="card-ic">{H.icon('film')}</div>
@@ -601,18 +594,11 @@ class AdminHandler(BaseHTTPRequestHandler):
               <a class="btn ghost btn-sm" href="/admin/dramas">View all {H.icon('chevron')}</a></div>
             {recent_html}
           </div>
-          <div class="col">
-            <div class="card">
-              <div class="card-head between"><div class="card-head-l"><div class="card-ic red">{H.icon('flag')}</div>
-                <div><h2>Open reports</h2><p class="muted">{open_n} waiting</p></div></div>
-                <a class="btn ghost btn-sm" href="/admin/reports">Open {H.icon('chevron')}</a></div>
-              {rep_html}
-            </div>
-            <div class="card">
-              <div class="card-head"><div class="card-ic gold">{H.icon('bolt')}</div>
-                <div><h2>Live stats text</h2><p class="muted">Same as the bot's /stats</p></div></div>
-              <pre class="mono stats-pre">{H.e(svc.stats_text())}</pre>
-            </div>
+          <div class="card">
+            <div class="card-head between"><div class="card-head-l"><div class="card-ic red">{H.icon('flag')}</div>
+              <div><h2>Open reports</h2><p class="muted">{open_n} waiting</p></div></div>
+              <a class="btn ghost btn-sm" href="/admin/reports">Open {H.icon('chevron')}</a></div>
+            {rep_html}
           </div>
         </div>
         """

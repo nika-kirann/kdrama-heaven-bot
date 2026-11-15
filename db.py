@@ -1,7 +1,8 @@
 """SQLite storage via SQLAlchemy 2.0."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (UniqueConstraint, Boolean, DateTime, ForeignKey, Integer, String, Text,
                         create_engine, event, func, inspect, or_, select, text)
@@ -214,6 +215,7 @@ class Database:
         self.engine = create_engine(url, future=True)
         self._migrate()
         self.Session = sessionmaker(self.engine, expire_on_commit=False)
+        self._live_stats_cache: tuple[float, dict] | None = None
         event.listen(self.Session, "after_commit", self._after_commit)
 
     @property
@@ -221,8 +223,12 @@ class Database:
         return self.url[len("sqlite:///"):] if self.url.startswith("sqlite:///") else None
 
     def _after_commit(self, _session):
+        self.invalidate_live_stats()
         if self.on_commit:
             self.on_commit()
+
+    def invalidate_live_stats(self) -> None:
+        self._live_stats_cache = None
 
     def _migrate(self):
         Base.metadata.create_all(self.engine)
@@ -604,6 +610,189 @@ class Database:
                 "requests": s.scalar(select(func.count(Request.id))),
                 "pending_schedules": s.scalar(select(func.count(Schedule.id)).where(Schedule.status == "pending")),
             }
+
+    def cached_live_stats(self, tz, now=None, ttl: float = 45) -> dict:
+        """Admin dashboard payload; cached ~45s and cleared on any DB commit."""
+        now = now or datetime.now(tz)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc).astimezone(tz)
+        else:
+            now = now.astimezone(tz)
+        cache = self._live_stats_cache
+        if cache and (time.monotonic() - cache[0]) < ttl:
+            return cache[1]
+        data = self.live_stats(tz, now)
+        self._live_stats_cache = (time.monotonic(), data)
+        return data
+
+    def live_stats(self, tz, now=None) -> dict:
+        """SQL-aggregate snapshot for the admin Live stats panel. JSON-safe, no countdown fields."""
+        from services import next_air_info
+        from utils import local_midnight_utc
+
+        now = now or datetime.now(tz)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc).astimezone(tz)
+        else:
+            now = now.astimezone(tz)
+        now_naive = now.astimezone(timezone.utc).replace(tzinfo=None)
+        ago = {
+            "24h": now_naive - timedelta(hours=24),
+            "7d": now_naive - timedelta(days=7),
+            "30d": now_naive - timedelta(days=30),
+        }
+        today_local = now.date()
+        days = [(today_local - timedelta(days=i)).isoformat() for i in range(29, -1, -1)]
+        series_start = local_midnight_utc(tz, now) - timedelta(days=29)
+        today_start = local_midnight_utc(tz, now)
+        offset_secs = int((now.utcoffset() or timedelta(0)).total_seconds())
+        mod = f"{offset_secs:+d} seconds"
+
+        def day_expr(col):
+            return func.date(func.datetime(col, mod))
+
+        def fill(rows) -> list[int]:
+            m = {str(d): int(n or 0) for d, n in rows}
+            return [m.get(d, 0) for d in days]
+
+        def cnt(s, col, since, *extra) -> int:
+            return int(s.scalar(select(func.count()).select_from(col.class_).where(col >= since, *extra)) or 0)
+
+        with self.session() as s:
+            alive = Drama.deleted.is_(False)
+            drama_n = lambda *w: int(s.scalar(select(func.count(Drama.id)).where(alive, *w)) or 0)
+            totals = {
+                "dramas": drama_n(),
+                "ongoing": drama_n(Drama.status == "Ongoing"),
+                "completed": drama_n(Drama.status == "Completed"),
+                "seasons": int(s.scalar(select(func.count(Season.id)).join(Drama).where(alive)) or 0),
+                "episodes": int(s.scalar(select(func.count(Episode.id)).join(Drama).where(alive)) or 0),
+                "users": int(s.scalar(select(func.count(User.id))) or 0),
+                "users_started": int(s.scalar(select(func.count(User.id)).where(User.started.is_(True))) or 0),
+                "users_blocked": int(s.scalar(select(func.count(User.id)).where(User.blocked.is_(True))) or 0),
+                "requests": int(s.scalar(select(func.count(Request.id))) or 0),
+                "requests_open": int(s.scalar(select(func.count(Request.id)).where(
+                    or_(Request.status.is_(None), Request.status == "open"))) or 0),
+                "requests_replied": int(s.scalar(select(func.count(Request.id)).where(Request.status == "replied")) or 0),
+                "requests_closed": int(s.scalar(select(func.count(Request.id)).where(Request.status == "closed")) or 0),
+                "reports_open": int(s.scalar(select(func.count(Report.id)).where(Report.status == "open")) or 0),
+                "reports_fixed": int(s.scalar(select(func.count(Report.id)).where(Report.status == "fixed")) or 0),
+                "reports_dismissed": int(s.scalar(select(func.count(Report.id)).where(Report.status == "dismissed")) or 0),
+                "follows": int(s.scalar(select(func.count(Follow.id))) or 0),
+                "clicks": int(s.scalar(select(func.count(Click.id))) or 0),
+                "posts_today": int(s.scalar(select(func.count(Post.id)).where(Post.created_at >= today_start)) or 0),
+                "pending_schedules": int(s.scalar(select(func.count(Schedule.id)).where(Schedule.status == "pending")) or 0),
+            }
+
+            deltas = {}
+            for key, since in ago.items():
+                ep_n = int(s.scalar(select(func.count(Episode.id)).join(Drama, Drama.id == Episode.drama_id)
+                                    .where(Episode.created_at >= since, alive)) or 0)
+                drama_new = int(s.scalar(select(func.count(Drama.id)).where(alive, Drama.created_at >= since)) or 0)
+                deltas[key] = {
+                    "dramas": drama_new,
+                    "episodes": ep_n,
+                    "users": cnt(s, User.created_at, since),
+                    "requests": cnt(s, Request.created_at, since),
+                    "replies": cnt(s, RequestReply.created_at, since),
+                    "reports": cnt(s, Report.created_at, since),
+                    "clicks": cnt(s, Click.created_at, since),
+                    "posts": cnt(s, Post.created_at, since),
+                    "follows": cnt(s, Follow.created_at, since),
+                }
+
+            def daily(col, *extra, join=None):
+                expr = day_expr(col)
+                q = select(expr, func.count())
+                if join is not None:
+                    q = q.select_from(join)
+                q = q.where(col >= series_start, *extra).group_by(expr)
+                return fill(s.execute(q).all())
+
+            series = {
+                "days": days,
+                "dramas": daily(Drama.created_at, alive),
+                "episodes": daily(Episode.created_at, alive,
+                                  join=Episode.__table__.join(Drama.__table__, Drama.id == Episode.drama_id)),
+                "users": daily(User.created_at),
+                "requests": daily(Request.created_at),
+                "clicks": daily(Click.created_at),
+                "reports": daily(Report.created_at),
+                "posts": daily(Post.created_at),
+            }
+
+            def top_clicked(since=None, n=5):
+                q = (select(Drama.id, Drama.title, func.count(Click.id).label("c"))
+                     .join(Drama, Drama.id == Click.drama_id).where(alive))
+                if since is not None:
+                    q = q.where(Click.created_at >= since)
+                rows = s.execute(q.group_by(Drama.id).order_by(text("c DESC")).limit(n)).all()
+                return [{"id": i, "title": t, "clicks": int(c)} for i, t, c in rows]
+
+            def top_qualities(since=None, n=4):
+                q = select(Click.quality, func.count(Click.id).label("c"))
+                if since is not None:
+                    q = q.where(Click.created_at >= since)
+                rows = s.execute(q.group_by(Click.quality).order_by(text("c DESC")).limit(n)).all()
+                return [{"quality": k, "clicks": int(c)} for k, c in rows]
+
+            fol_rows = s.execute(
+                select(Drama.id, Drama.title, func.count(Follow.id).label("c"))
+                .join(Follow, Follow.drama_id == Drama.id).where(alive)
+                .group_by(Drama.id).order_by(text("c DESC")).limit(5)
+            ).all()
+            top_followed = [{"id": i, "title": t, "followers": int(c)} for i, t, c in fol_rows]
+
+            upcoming_src = list(s.scalars(
+                select(Drama).where(alive, Drama.status == "Ongoing",
+                                    Drama.next_ep_date.is_not(None),
+                                    Drama.next_ep_date >= today_local.isoformat())
+                .order_by(Drama.next_ep_date, Drama.title).limit(12)
+            ))
+            # relationships needed by next_air_info
+            for d in upcoming_src:
+                _ = list(d.seasons)
+                for sea in d.seasons:
+                    _ = list(sea.episodes)
+                _ = list(d.episodes)
+
+            top_clicked_7d = top_clicked(ago["7d"])
+            top_clicked_all = top_clicked()
+            top_qualities_7d = top_qualities(ago["7d"])
+            top_qualities_all = top_qualities()
+
+        upcoming = []
+        for d in upcoming_src:
+            info = next_air_info(d, tz, now)
+            if not info:
+                continue
+            ep, when, has_time = info
+            cur = d.current
+            upcoming.append({
+                "id": d.id,
+                "title": d.title,
+                "episode": ep,
+                "season": cur.number if d.is_multi and cur else None,
+                "date": f"{when:%B} {when.day}, {when.year}",
+                "time": (when.strftime("%I:%M %p").lstrip("0") + (f" {when.tzname()}" if when.tzname() else "")
+                         if has_time else None),
+                "iso": when.date().isoformat(),
+            })
+
+        return {
+            "ok": True,
+            "generated_at": now.isoformat(timespec="seconds"),
+            "tz": getattr(tz, "key", str(tz)),
+            "totals": totals,
+            "deltas": deltas,
+            "series": series,
+            "top_clicked_7d": top_clicked_7d,
+            "top_clicked_all": top_clicked_all,
+            "top_followed": top_followed,
+            "top_qualities_7d": top_qualities_7d,
+            "top_qualities_all": top_qualities_all,
+            "upcoming": upcoming,
+        }
 
     # ---- posts --------------------------------------------------------
     def add_post(self, chat_id, message_id: int, kind: str, drama_id=None, is_photo=False) -> Post:

@@ -222,3 +222,230 @@ function wireQualityButtons(root) {
     });
   });
 })();
+
+// Live stats: render from embedded JSON, refresh /admin/api/stats every 30s
+(function liveStats() {
+  const root = document.getElementById('live-stats');
+  const raw = document.getElementById('live-stats-data');
+  if (!root || !raw) return;
+
+  const METRICS = ['clicks', 'users', 'episodes', 'requests', 'reports'];
+  const INTERVAL = 30000;
+  let data;
+  try { data = JSON.parse(raw.textContent); } catch (e) { return; }
+  let metric = root.getAttribute('data-default-metric') || 'clicks';
+  if (!METRICS.includes(metric)) metric = 'clicks';
+  let fetchedAt = Date.now();
+
+  function sparkline(values, w, h) {
+    w = w || 120; h = h || 36;
+    const vals = (values && values.length ? values : [0]).map(v => Math.max(0, +v || 0));
+    const mx = Math.max.apply(null, vals.concat([1]));
+    const n = vals.length;
+    const pts = vals.map((v, i) => {
+      const x = n === 1 ? 0 : i * w / (n - 1);
+      const y = h - 2 - (v / mx) * (h - 4);
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    });
+    const line = pts.join(' ');
+    const area = '0,' + h + ' ' + line + ' ' + w + ',' + h;
+    return '<svg class="spark" viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h +
+      '" preserveAspectRatio="none" aria-hidden="true"><polygon class="spark-fill" points="' + area +
+      '"/><polyline class="spark-line" fill="none" points="' + line + '"/></svg>';
+  }
+
+  function barChart(days, values, w, h) {
+    w = w || 640; h = h || 148;
+    const vals = (values || []).map(v => Math.max(0, +v || 0));
+    const labels = days || [];
+    const n = Math.max(vals.length, 1);
+    const mx = Math.max.apply(null, vals.concat([1]));
+    const padT = 8, padB = 22, padX = 2;
+    const innerH = h - padT - padB;
+    const gap = 2;
+    const bw = Math.max(1.4, (w - 2 * padX - gap * (n - 1)) / n);
+    let bars = '';
+    for (let i = 0; i < n; i++) {
+      const v = vals[i] || 0;
+      const x = padX + i * (bw + gap);
+      let bh = mx ? (v / mx) * innerH : 0;
+      let y = padT + innerH - bh;
+      let cls = 'on';
+      let ht = v ? Math.max(bh, 1.5) : 1.2;
+      if (!v) { y = padT + innerH - 1.2; cls = 'empty'; }
+      const day = labels[i] || '';
+      bars += '<rect class="' + cls + '" x="' + x.toFixed(2) + '" y="' + y.toFixed(2) +
+        '" width="' + bw.toFixed(2) + '" height="' + ht.toFixed(2) + '" rx="1.4"><title>' +
+        esc(day) + ': ' + v + '</title></rect>';
+    }
+    function lab(i) {
+      if (!labels[i]) return '';
+      const x = padX + i * (bw + gap) + bw / 2;
+      const anchor = i === 0 ? 'start' : (i === n - 1 ? 'end' : 'middle');
+      return '<text class="bar-lab" x="' + x.toFixed(1) + '" y="' + (h - 6) +
+        '" text-anchor="' + anchor + '">' + esc((labels[i] || '').slice(5)) + '</text>';
+    }
+    const mid = Math.floor(n / 2);
+    return '<svg class="bars" viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="' + h +
+      '" preserveAspectRatio="none" role="img" aria-label="Activity last 30 days">' +
+      bars + lab(0) + lab(mid) + lab(n - 1) + '</svg>';
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+  }
+
+  function fmtDelta(n, period) {
+    n = +n || 0;
+    const cls = n > 0 ? 'up' : (n < 0 ? 'down' : 'zero');
+    const sign = n > 0 ? '+' + n : String(n);
+    return '<div class="stat-delta ' + cls + '">' + sign + ' · ' + esc(period || '7d') + '</div>';
+  }
+
+  function rankList(rows, countKey, empty) {
+    if (!rows || !rows.length) return '<p class="muted sm empty-mini">' + esc(empty) + '</p>';
+    let mx = 1;
+    rows.forEach(r => { mx = Math.max(mx, +r[countKey] || 0); });
+    return '<ol class="rank-list">' + rows.map((r, i) => {
+      const n = +r[countKey] || 0;
+      const pct = Math.max(4, Math.round(n * 100 / mx));
+      const title = esc(r.title || r.quality || '—');
+      const label = r.id
+        ? '<a href="/admin/drama/' + (+r.id) + '">' + title + '</a>'
+        : '<span>' + title + '</span>';
+      return '<li><span class="rank-i">' + (i + 1) + '</span><div class="rank-body">' + label +
+        '<i class="rank-bar" style="width:' + pct + '%"></i></div><span class="rank-n">' + n + '</span></li>';
+    }).join('') + '</ol>';
+  }
+
+  function upcomingList(rows) {
+    if (!rows || !rows.length) return '<p class="muted sm empty-mini">No upcoming episode dates set.</p>';
+    return '<ul class="air-list">' + rows.map(r => {
+      const ep = r.season ? ('S' + r.season + ' Ep ' + r.episode) : ('Ep ' + r.episode);
+      const extra = r.time ? ' · ' + esc(r.time) : '';
+      return '<li><a href="/admin/drama/' + (+r.id) + '"><b>' + esc(r.title) + '</b></a>' +
+        '<div class="muted sm">' + esc(ep) + ' · ' + esc(r.date) + extra + '</div></li>';
+    }).join('') + '</ul>';
+  }
+
+  function periodPills(deltas, key) {
+    return ['24h', '7d', '30d'].map(p => {
+      const n = +((deltas[p] || {})[key] || 0);
+      const sign = n > 0 ? '+' + n : String(n);
+      return '<span class="period-pill" data-period="' + p + '"><b>' + sign + '</b> ' + p + '</span>';
+    }).join('');
+  }
+
+  function agoText() {
+    const s = Math.max(0, Math.round((Date.now() - fetchedAt) / 1000));
+    if (s < 10) return 'Updated just now';
+    if (s < 60) return 'Updated ' + s + 's ago';
+    const m = Math.round(s / 60);
+    return 'Updated ' + m + 'm ago';
+  }
+
+  function setText(sel, value) {
+    root.querySelectorAll(sel).forEach(el => { el.textContent = value; });
+  }
+
+  function render(d) {
+    data = d;
+    const t = d.totals || {};
+    const d7 = (d.deltas || {})['7d'] || {};
+    const series = d.series || {};
+    const numbers = {
+      dramas: t.dramas, ongoing: t.ongoing, completed: t.completed, episodes: t.episodes,
+      users: t.users, requests: t.requests, reports_open: t.reports_open, clicks: t.clicks
+    };
+    Object.keys(numbers).forEach(k => {
+      const el = root.querySelector('[data-n="' + k + '"]');
+      if (el && numbers[k] != null) el.textContent = numbers[k];
+    });
+    const reqSub = (t.requests_open || 0) + ' pending · ' + (t.requests_replied || 0) + ' replied';
+    let userSub = (t.users_started || 0) + ' started';
+    if (t.users_blocked) userSub += ' · ' + t.users_blocked + ' blocked';
+    const subEl = root.querySelector('[data-sub="requests"]');
+    if (subEl) subEl.textContent = reqSub;
+    const uEl = root.querySelector('[data-sub="users"]');
+    if (uEl) uEl.textContent = userSub;
+
+    const deltaMap = {
+      dramas: d7.dramas, episodes: d7.episodes, users: d7.users,
+      requests: d7.requests, reports_open: d7.reports, clicks: d7.clicks
+    };
+    Object.keys(deltaMap).forEach(k => {
+      const card = root.querySelector('[data-stat="' + k + '"] .stat-delta');
+      if (card) card.outerHTML = fmtDelta(deltaMap[k], '7d');
+    });
+    const sparkMap = {
+      dramas: series.dramas, episodes: series.episodes, users: series.users,
+      requests: series.requests, reports_open: series.reports, clicks: series.clicks
+    };
+    Object.keys(sparkMap).forEach(k => {
+      const box = root.querySelector('[data-spark="' + k + '"]');
+      if (box && sparkMap[k]) box.innerHTML = sparkline(sparkMap[k]);
+    });
+    const chart = root.querySelector('[data-chart]');
+    if (chart) chart.innerHTML = barChart(series.days || [], series[metric] || []);
+    const periods = root.querySelector('[data-periods]');
+    if (periods) periods.innerHTML = periodPills(d.deltas || {}, metric);
+    const up = root.querySelector('[data-upcoming]');
+    if (up) up.innerHTML = upcomingList(d.upcoming || []);
+    const tc = root.querySelector('[data-top-clicked]');
+    if (tc) tc.innerHTML = rankList(d.top_clicked_7d || [], 'clicks', 'No clicks in the last 7 days.');
+    const tf = root.querySelector('[data-top-followed]');
+    if (tf) tf.innerHTML = rankList(d.top_followed || [], 'followers', 'No followers yet.');
+    const tq = root.querySelector('[data-top-qualities]');
+    if (tq) tq.innerHTML = rankList(d.top_qualities_7d || [], 'clicks', 'No quality clicks in the last 7 days.');
+    const extra = root.querySelector('.live-extra');
+    if (extra) {
+      extra.innerHTML = '<span>Posts today <b>' + (t.posts_today || 0) + '</b></span>' +
+        '<span>Follows <b>' + (t.follows || 0) + '</b></span>' +
+        '<span>Pending schedules <b>' + (t.pending_schedules || 0) + '</b></span>';
+    }
+    const ago = root.querySelector('[data-live-updated]');
+    if (ago) ago.textContent = agoText();
+  }
+
+  function setMetric(next) {
+    if (!METRICS.includes(next)) return;
+    metric = next;
+    root.querySelectorAll('.act-tab').forEach(btn => {
+      btn.classList.toggle('on', btn.getAttribute('data-metric') === metric);
+    });
+    const series = (data && data.series) || {};
+    const chart = root.querySelector('[data-chart]');
+    if (chart) chart.innerHTML = barChart(series.days || [], series[metric] || []);
+    const periods = root.querySelector('[data-periods]');
+    if (periods) periods.innerHTML = periodPills((data && data.deltas) || {}, metric);
+  }
+
+  root.querySelectorAll('.act-tab').forEach(btn => {
+    btn.addEventListener('click', () => setMetric(btn.getAttribute('data-metric')));
+  });
+
+  async function tick() {
+    try {
+      const r = await fetch('/admin/api/stats', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+      if (!r.ok) throw new Error('status ' + r.status);
+      const d = await r.json();
+      if (!d || !d.ok) throw new Error('bad payload');
+      fetchedAt = Date.now();
+      root.classList.remove('stale');
+      render(d);
+    } catch (err) {
+      root.classList.add('stale');
+      const ago = root.querySelector('[data-live-updated]');
+      if (ago) ago.textContent = 'Refresh failed · ' + agoText();
+    }
+  }
+
+  setInterval(() => {
+    const ago = root.querySelector('[data-live-updated]');
+    if (ago && !root.classList.contains('stale')) ago.textContent = agoText();
+  }, 5000);
+  setInterval(tick, INTERVAL);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+})();
