@@ -59,6 +59,10 @@ class Config:
     admin_web_secret: str = field(default_factory=lambda: os.getenv("ADMIN_WEB_SECRET", "").strip())
     # Public site posters (streamed from Telegram, never cached in RAM). 0 = letter tiles only.
     public_posters: bool = field(default_factory=lambda: os.getenv("PUBLIC_POSTERS", "0").strip().lower() not in {"0", "false", "no", "off"})
+    # Canonical public site origin for Open Graph / share URLs (used when the request
+    # Host is the Koyeb/Mistral origin). Request Host / X-Forwarded-Host still wins
+    # for kdramaheaven.in and www.
+    public_base_url: str = field(default_factory=lambda: (os.getenv("PUBLIC_BASE_URL", "https://kdramaheaven.in").strip() or "https://kdramaheaven.in").rstrip("/"))
 
     @property
     def brand_handle(self) -> str:

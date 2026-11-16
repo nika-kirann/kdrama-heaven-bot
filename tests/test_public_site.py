@@ -42,8 +42,11 @@ def test_home_lists_rows_and_full_next_date(web):
     a, b = seed(web.db)
     st, hdrs, body = raw(web, "/")
     assert st == 200 and hdrs["Content-Type"].startswith("text/html")
-    for s in ("Latest updates", "Ongoing", "Completed", "Lovely Runner", "Squid Game", 'href="/drama/'):
+    for s in ("New this week", "Ongoing", "Completed", "Lovely Runner", "Squid Game", 'href="/drama/'):
         assert s in body
+    assert 'id="continue" hidden' in body and "Continue watching" in body
+    assert "Trending this week" not in body  # no clicks yet
+    assert "Latest updates" not in body      # weekly activity replaces this row
     assert "November 11, 2099" in body and "days" not in body.lower().split("<body")[1].replace("holidays", "")
     assert 'og:title' in body and 'rel="icon"' in body and "/static/public.css?v=" in body
     assert 'alt="Kdrama Heaven"' in body
@@ -373,3 +376,150 @@ def test_web_poster_overrides_telegram_streaming_when_both(web, tg_files, poster
     body = raw(web, f"/drama/{d.id}")[2]
     assert 'src="https://img.example/w.jpg"' in body and "/poster/" not in body
     assert raw(web, f"/poster/{d.id}.jpg")[0] == 404 and calls == []
+
+
+# ---------------- continue watching, trending, new this week, share previews ----------------
+from datetime import datetime, timedelta, timezone  # noqa: E402
+from db import Click, Drama, Episode  # noqa: E402
+from sqlalchemy import update  # noqa: E402
+
+
+def _ago(days: int) -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+
+
+def _stamp_drama(db, did: int, when: datetime) -> None:
+    with db.session() as s:
+        s.execute(update(Drama).where(Drama.id == did).values(created_at=when, updated_at=when))
+        s.execute(update(Episode).where(Episode.drama_id == did).values(created_at=when))
+        s.commit()
+
+
+def test_continue_watching_hooks_are_client_only(web):
+    import html as _html
+    a, b = seed(web.db)
+    home = raw(web, "/")[2]
+    assert 'id="continue" hidden' in home
+    assert 'id="continue-track"' in home and "cw-clear" in home
+    # no continue cards are server-rendered (localStorage only)
+    assert "cw-card" not in home and "Continue EP" not in home
+    js = raw(web, f"/static/public.js?v={P.ASSET_V}")[2]
+    assert "kdh-continue" in js and "localStorage" in js and "Continue EP" in js
+    page = raw(web, f"/drama/{b.id}?ep=1")[2]
+    raw_watch = re.search(r'data-watch="([^"]*)"', page).group(1)
+    watch = json.loads(_html.unescape(raw_watch))
+    assert watch["id"] == b.id and watch["title"] == "Squid Game" and watch["ep"] == 1
+    assert watch["url"].startswith(f"/drama/{b.id}")
+    assert f"/static/public.js?v={P.ASSET_V}" in page
+
+
+def test_trending_and_new_this_week_rows(web):
+    a, b = seed(web.db)
+    stale = web.db.add_drama(title="Old Hit", status="Completed", year=2020,
+                             episodes={1: [("720p", "https://cdn.x/old-720.mkv", "part")]})
+    brand_new = web.db.add_drama(title="Brand New Title", status="Ongoing")  # no episodes yet
+    _stamp_drama(web.db, a.id, _ago(20))
+    _stamp_drama(web.db, stale.id, _ago(30))
+    # recent clicks on Squid Game (3) and Old Hit (1); Lovely Runner clicks are too old
+    with web.db.session() as s:
+        for _ in range(3):
+            s.add(Click(drama_id=b.id, episode=1, quality="480p", created_at=_ago(1)))
+        s.add(Click(drama_id=stale.id, episode=1, quality="720p", created_at=_ago(2)))
+        s.add(Click(drama_id=a.id, episode=1, quality="720p", created_at=_ago(20)))
+        s.commit()
+    P.invalidate()
+    body = raw(web, "/")[2]
+    assert "Trending this week" in body and "New this week" in body
+    assert "Latest updates" not in body
+    trend = body.split("Trending this week")[1].split("New this week")[0]
+    # ranked by clicks: Squid Game before Old Hit; Lovely Runner's stale click is omitted
+    assert trend.find("Squid Game") < trend.find("Old Hit")
+    assert "Lovely Runner" not in trend
+    fresh = body.split("New this week")[1].split("</section>")[0]
+    assert "Squid Game" in fresh and "Brand New Title" in fresh
+    assert "Lovely Runner" not in fresh and "Old Hit" not in fresh
+
+    # when nothing happened this week, Latest updates returns and the weekly rows hide
+    _stamp_drama(web.db, b.id, _ago(15))
+    _stamp_drama(web.db, brand_new.id, _ago(15))
+    with web.db.session() as s:
+        s.execute(update(Click).values(created_at=_ago(20)))
+        s.commit()
+    P.invalidate()
+    body = raw(web, "/")[2]
+    assert "Latest updates" in body and "New this week" not in body and "Trending this week" not in body
+    assert "Lovely Runner" in body and "Squid Game" in body
+
+
+def test_public_origin_uses_base_url_or_forwarded_host(web):
+    assert web.cfg.public_base_url == "https://kdramaheaven.in"
+    ctx = {"cfg": web.cfg}
+    assert P.public_origin(ctx, "") == "https://kdramaheaven.in"
+    assert P.public_origin(ctx, "127.0.0.1:8000") == "https://kdramaheaven.in"
+    assert P.public_origin(ctx, "localhost") == "https://kdramaheaven.in"
+    assert P.public_origin(ctx, "app.koyeb.app") == "https://kdramaheaven.in"
+    assert P.public_origin(ctx, "poor-jewel-ananthu4-41c37fdf.apps.mistral.run") == "https://kdramaheaven.in"
+    assert P.public_origin(ctx, "kdramaheaven.in") == "https://kdramaheaven.in"
+    assert P.public_origin(ctx, "www.kdramaheaven.in") == "https://www.kdramaheaven.in"
+    web.cfg.public_base_url = "https://example.test"
+    assert P.public_origin(ctx, "foo.koyeb.app") == "https://example.test"
+    web.cfg.public_base_url = "https://kdramaheaven.in"
+
+    seed(web.db)
+    req = urllib.request.Request(web.base + "/", headers={"X-Forwarded-Host": "www.kdramaheaven.in"})
+    op = urllib.request.build_opener(NoRedirect)
+    with op.open(req, timeout=5) as r:
+        body = r.read().decode("utf-8", "replace")
+    assert 'property="og:url" content="https://www.kdramaheaven.in/"' in body
+    assert 'property="og:image" content="https://www.kdramaheaven.in/static/og-default.jpg' in body
+
+
+def test_share_meta_tags_and_default_image(web):
+    import io
+    from PIL import Image
+
+    a, b = seed(web.db)
+    web.db.update_drama(b.id, web_poster_url="https://img.example/sg.jpg")
+    P.invalidate()
+    body = raw(web, f"/drama/{b.id}")[2]
+    assert 'property="og:site_name" content="Kdrama Heaven"' in body
+    assert 'property="og:title" content="Squid Game · Kdrama Heaven"' in body
+    assert "Squid Game (2021)" not in body
+    desc = re.search(r'property="og:description" content="([^"]*)"', body).group(1)
+    assert "Ongoing" in desc and "EP" in desc and "480p" in desc and "1080p" in desc
+    assert 'property="og:image" content="https://img.example/sg.jpg"' in body
+    assert 'name="twitter:card" content="summary_large_image"' in body
+    assert 'name="twitter:image" content="https://img.example/sg.jpg"' in body
+    assert f'property="og:url" content="https://kdramaheaven.in/drama/{b.id}-squid-game"' in body
+
+    # no website poster → branded default share image
+    body = raw(web, f"/drama/{a.id}")[2]
+    default = f"https://kdramaheaven.in/static/og-default.jpg?v={P.ASSET_V}"
+    assert f'property="og:image" content="{default}"' in body
+    home = raw(web, "/")[2]
+    search = raw(web, "/search?q=squid")[2]
+    for page in (home, search):
+        assert 'property="og:site_name" content="Kdrama Heaven"' in page
+        assert f'property="og:image" content="{default}"' in page
+        assert 'name="twitter:card" content="summary_large_image"' in page
+    assert 'property="og:url" content="https://kdramaheaven.in/"' in home
+
+    op = urllib.request.build_opener(NoRedirect)
+    with op.open(web.base + f"/static/og-default.jpg?v={P.ASSET_V}", timeout=5) as r:
+        data, hdrs = r.read(), dict(r.headers)
+        st = r.status
+    assert st == 200 and hdrs["Content-Type"].startswith("image/jpeg")
+    assert "max-age=604800" in hdrs["Cache-Control"]
+    assert len(data) < 150_000
+    im = Image.open(io.BytesIO(data))
+    assert im.size == (1200, 630)
+
+
+def test_public_base_url_env(monkeypatch):
+    from config import Config
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+    assert Config().public_base_url == "https://kdramaheaven.in"
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://www.kdramaheaven.in/")
+    assert Config().public_base_url == "https://www.kdramaheaven.in"
+    monkeypatch.setenv("PUBLIC_BASE_URL", "")
+    assert Config().public_base_url == "https://kdramaheaven.in"

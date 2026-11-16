@@ -350,3 +350,20 @@ h1, h2, h3 { letter-spacing: -.02em; margin: 0; }
 .bgimg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 22%;
   filter: blur(30px) saturate(150%) brightness(.6); transform: scale(1.15); }
 .has-img > span { display: none; }
+
+/* continue watching + weekly badges */
+.hot { padding: 3px 8px; border-radius: 8px; font-size: 11px; font-weight: 800; color: #fff;
+  background: linear-gradient(135deg, #ec4899, #8b5cf6); box-shadow: 0 4px 14px rgba(236,72,153,.4); }
+.cont { padding: 3px 8px; border-radius: 8px; font-size: 11px; font-weight: 800; color: #fff;
+  background: linear-gradient(135deg, var(--p), var(--p3)); box-shadow: 0 4px 14px rgba(139,92,246,.45); }
+#continue[hidden] { display: none; }
+#continue .sec-h .cw-clear { background: none; border: 0; padding: 0; font: inherit; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 2px; color: var(--p2); font-weight: 600; font-size: 14px; }
+#continue .sec-h .cw-clear:hover { color: #fff; }
+.cw-card { position: relative; }
+.cw-x { position: absolute; top: 8px; right: 8px; z-index: 3; width: 28px; height: 28px; padding: 0;
+  border-radius: 99px; border: 1px solid rgba(255,255,255,.16); background: rgba(11,9,24,.72);
+  color: #fff; cursor: pointer; display: grid; place-items: center; backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px); transition: background .2s, transform .2s var(--ease); }
+.cw-x .i { width: 14px; height: 14px; }
+.cw-x:hover { background: rgba(236,72,153,.9); transform: scale(1.06); }

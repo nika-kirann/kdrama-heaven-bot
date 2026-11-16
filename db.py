@@ -979,6 +979,41 @@ class Database:
                 q = q.where(Click.created_at >= since)
             return [(t, c) for t, c in s.execute(q.group_by(Drama.id).order_by(text("c DESC")).limit(n)).all()]
 
+    def trending_drama_ids(self, since: datetime, limit: int = 16) -> list[int]:
+        """Drama ids ranked by click count since `since` (SQL aggregate). Deleted dramas omitted."""
+        with self.session() as s:
+            rows = s.execute(
+                select(Click.drama_id, func.count(Click.id).label("c"))
+                .join(Drama, Drama.id == Click.drama_id)
+                .where(Drama.deleted.is_(False), Click.created_at >= since)
+                .group_by(Click.drama_id)
+                .order_by(text("c DESC"), Click.drama_id)
+                .limit(limit)
+            ).all()
+        return [did for did, _ in rows]
+
+    def new_this_week_ids(self, since: datetime, limit: int = 16) -> list[int]:
+        """Dramas created in the window, or with an episode added in the window, newest activity first."""
+        alive = Drama.deleted.is_(False)
+        with self.session() as s:
+            ep_rows = s.execute(
+                select(Episode.drama_id, func.max(Episode.created_at))
+                .join(Drama, Drama.id == Episode.drama_id)
+                .where(alive, Episode.created_at >= since)
+                .group_by(Episode.drama_id)
+            ).all()
+            new_rows = s.execute(
+                select(Drama.id, Drama.created_at).where(alive, Drama.created_at >= since)
+            ).all()
+        activity: dict[int, datetime] = {}
+        for did, at in ep_rows:
+            if at is not None:
+                activity[did] = at
+        for did, at in new_rows:
+            prev = activity.get(did)
+            activity[did] = at if prev is None or (at and at > prev) else prev
+        return [did for did, _ in sorted(activity.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)[:limit]]
+
     def top_qualities(self, since: datetime | None = None, n: int = 3) -> list[tuple[str, int]]:
         with self.session() as s:
             q = select(Click.quality, func.count(Click.id).label("c"))

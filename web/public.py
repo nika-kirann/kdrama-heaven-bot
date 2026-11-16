@@ -13,19 +13,24 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict, deque
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from . import html as H
 
 log = logging.getLogger(__name__)
-ASSET_V = "8"
+ASSET_V = "9"
 CACHE_TTL = 60.0
 CATALOG_MAX = 3000       # dramas kept in the single cached snapshot (bounded memory)
 SYNOPSIS_MAX = 1500      # chars kept per synopsis
 DEFAULT_BOT = "kdrama_help_robot"
 QUALITY_ORDER = {"480p": 0, "540p": 1, "720p": 2, "HD": 3, "1080p": 4, "4K": 5, "2160p": 5}
+SHARE_IMAGE = f"/static/og-default.jpg?v={ASSET_V}"
+SITE_NAME = "Kdrama Heaven"
+# Hosts that are the app origin (or local), not the public domain. OG URLs use PUBLIC_BASE_URL then.
+_ORIGIN_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+_ORIGIN_SUFFIXES = (".koyeb.app", ".mistral.run")
 
 _lock = threading.Lock()
 _cache: dict = {"key": None, "at": 0.0, "data": None}
@@ -65,6 +70,31 @@ def slug(s: str) -> str:
 
 def is_http(u: str | None) -> bool:
     return bool(u) and str(u).lower().startswith(("http://", "https://"))
+
+
+def public_origin(ctx, host: str = "") -> str:
+    """Absolute origin for canonical / Open Graph URLs.
+
+    A public Host or X-Forwarded-Host (kdramaheaven.in, www) is used as-is so the
+    Cloudflare Worker proxy keeps the address bar host in share previews. Localhost
+    and origin hosts (koyeb.app, mistral.run) fall back to PUBLIC_BASE_URL, which
+    defaults to https://kdramaheaven.in.
+    """
+    cfg = ctx.get("cfg") if ctx else None
+    env = (getattr(cfg, "public_base_url", None) or "https://kdramaheaven.in").strip().rstrip("/")
+    if not env:
+        env = "https://kdramaheaven.in"
+    host = (host or "").split(",")[0].strip()
+    if not host:
+        return env
+    raw = host.split("/")[0]
+    if raw.startswith("["):
+        hostname = raw[1:].split("]")[0].lower()
+    else:
+        hostname = raw.split(":")[0].lower()
+    if hostname in _ORIGIN_HOSTS or any(hostname.endswith(s) for s in _ORIGIN_SUFFIXES):
+        return env
+    return "https://" + raw
 
 
 from utils import clean_web_poster  # noqa: E402  (website-only poster URL validation)
@@ -149,7 +179,14 @@ def _build(ctx) -> dict:
             "updated": _to_naive(d["updated_at"]), "n": norm(d["title"]), "alt": [],
         })
     by_id = {x["id"]: x for x in items}
-    return {"items": items, "by_id": by_id, "built": time.time()}
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+    trending, new_week = [], []
+    try:
+        trending = [by_id[i] for i in db.trending_drama_ids(since, limit=16) if i in by_id]
+        new_week = [by_id[i] for i in db.new_this_week_ids(since, limit=16) if i in by_id]
+    except Exception:
+        log.exception("week rails failed")
+    return {"items": items, "by_id": by_id, "trending": trending, "new_week": new_week, "built": time.time()}
 
 
 def detail(ctx, did: int) -> dict | None:
@@ -319,15 +356,43 @@ def search_box(q: str = "", big: bool = False, autofocus: bool = False) -> str:
             f'<div class="suggest" role="listbox" hidden></div></form>')
 
 
+def share_desc(d, quals: list[str] | None = None) -> str:
+    """Open Graph description: status, episode count, qualities, then synopsis."""
+    bits = [x for x in [d.get("status") or "", progress(d)] if x]
+    if quals:
+        bits.append(", ".join(quals))
+    head = " · ".join(bits)
+    syn = (d.get("synopsis") or "").strip()
+    if syn:
+        text = f"{head}. {syn}" if head else syn
+    else:
+        text = f"Watch {d['title']} episodes in 480p, 720p and 1080p on Kdrama Heaven."
+        if head:
+            text = f"{head}. {text}"
+    return text[:300]
+
+
 def page(ctx, *, title: str, body: str, desc: str = "", image: str | None = None, path: str = "/",
-         host: str = "", nav: str = "") -> str:
+         host: str = "", nav: str = "", watch: dict | None = None) -> str:
     bot, chan = bot_name(ctx), channel_handle(ctx)
-    base = f"https://{host}" if host else ""
-    full_title = f"{title} · kdrama_heaven" if title != "kdrama_heaven" else "kdrama_heaven — Watch K-dramas in 480p, 720p & 1080p"
-    desc = desc or "Browse ongoing and completed Korean dramas, pick an episode and choose 480p, 720p or 1080p. New episodes every week on kdrama_heaven."
-    img = image if (image and is_http(image)) else (base + image if image else "")
-    og_img = (f'<meta property="og:image" content="{e(img)}"><meta name="twitter:image" content="{e(img)}">'
-              if img else "")
+    base = public_origin(ctx, host)
+    if title in {"kdrama_heaven", SITE_NAME}:
+        full_title = "Kdrama Heaven — Watch K-dramas in 480p, 720p & 1080p"
+    else:
+        full_title = f"{title} · {SITE_NAME}"
+    desc = desc or "Browse ongoing and completed Korean dramas, pick an episode and choose 480p, 720p or 1080p. New episodes every week on Kdrama Heaven."
+    if image and is_http(image):
+        img = image
+    elif image:
+        img = base + image
+    else:
+        img = base + SHARE_IMAGE
+    og_img = (f'<meta property="og:image" content="{e(img)}">'
+              f'<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">'
+              f'<meta name="twitter:image" content="{e(img)}">')
+    watch_attr = ""
+    if watch:
+        watch_attr = f' data-watch="{e(json.dumps(watch, ensure_ascii=True, separators=(",", ":")))}"'
     navl = lambda k, href, label: f'<a href="{href}" class="{"on" if nav == k else ""}">{label}</a>'
     return f"""<!doctype html>
 <html lang="en"><head>
@@ -336,10 +401,11 @@ def page(ctx, *, title: str, body: str, desc: str = "", image: str | None = None
 <meta name="description" content="{e(desc[:300])}">
 <meta name="theme-color" content="#0b0918">
 <link rel="canonical" href="{e(base + path)}">
-<meta property="og:type" content="website"><meta property="og:site_name" content="kdrama_heaven">
+<meta property="og:type" content="website"><meta property="og:site_name" content="{SITE_NAME}">
 <meta property="og:title" content="{e(full_title)}"><meta property="og:description" content="{e(desc[:300])}">
 <meta property="og:url" content="{e(base + path)}">{og_img}
-<meta name="twitter:card" content="{'summary_large_image' if img else 'summary'}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{e(full_title)}"><meta name="twitter:description" content="{e(desc[:300])}">
 <link rel="icon" href="/static/favicon-32.png?v={ASSET_V}" type="image/png" sizes="32x32"><link rel="icon" href="/favicon.ico?v={ASSET_V}" sizes="any"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v={ASSET_V}" sizes="180x180">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap">
@@ -356,7 +422,7 @@ def page(ctx, *, title: str, body: str, desc: str = "", image: str | None = None
   </div>
   <div class="hdr-search" id="hdr-search" hidden>{search_box()}<button type="button" class="icon-b" id="search-close" aria-label="Close search">{ic("x")}</button></div>
 </header>
-<main id="main">
+<main id="main"{watch_attr}>
 {body}
 </main>
 <footer class="ftr">
@@ -426,6 +492,23 @@ def home(ctx, status: str = "", host: str = "") -> str:
     hero = (f'<section class="hero" id="hero">{"".join(slides)}'
             f'<div class="hero-dots">{"".join(dots) if len(dots) > 1 else ""}</div></section>') if slides else ""
     latest_cards = "".join(card(d, f'<span class="new">{e(d["latest_label"])}</span>') for d in latest[:16])
+    trending_cards = "".join(card(d, '<span class="hot">Trending</span>') for d in (cat.get("trending") or []))
+    new_week = cat.get("new_week") or []
+    new_cards = "".join(
+        card(d, f'<span class="new">{e(d["latest_label"] or "New")}</span>') for d in new_week)
+    # "New this week" is a 7-day slice of the same idea as "Latest updates".
+    # Show it when there's weekly activity; otherwise keep Latest updates so the
+    # home page still has a freshness row. Never both, so they don't repeat.
+    fresh = (rail("New this week", new_cards, sub="Episodes added and titles that arrived this week")
+             if new_cards else
+             rail("Latest updates", latest_cards, sub="Freshly added episodes"))
+    continue_rail = (
+        '<section class="rail" id="continue" hidden>'
+        '<div class="sec-h"><div><h2>Continue watching</h2>'
+        "<p>Pick up where you left off — saved on this device only.</p></div>"
+        '<button type="button" class="more cw-clear">Clear all</button></div>'
+        '<div class="rail-track" id="continue-track"></div></section>'
+    )
     st = status.lower()
     grid_items = ongoing if st == "ongoing" else completed if st == "completed" else items
     tabs = "".join(
@@ -441,7 +524,9 @@ def home(ctx, status: str = "", host: str = "") -> str:
       {search_box(big=True)}
     </div></section>
     <div class="wrap">
-      {rail("Latest updates", latest_cards, sub="Freshly added episodes")}
+      {continue_rail}
+      {rail("Trending this week", trending_cards, sub="Most opened episodes this week")}
+      {fresh}
       {rail("Ongoing", "".join(card(d) for d in ongoing[:16]), "/?status=ongoing#browse", "Airing now — new episodes every week")}
       {rail("Completed", "".join(card(d) for d in completed[:16]), "/?status=completed#browse", "Binge the whole series")}
       <section class="browse" id="browse">
@@ -453,8 +538,7 @@ def home(ctx, status: str = "", host: str = "") -> str:
         <a class="btn pri" href="{tme(bot, 'request')}" target="_blank" rel="noopener">{ic("plus")}Request a drama</a>
       </section>
     </div>"""
-    img = featured[0]["poster"] if featured else None
-    return page(ctx, title="kdrama_heaven", body=body, image=img, path="/", host=host,
+    return page(ctx, title="kdrama_heaven", body=body, path="/", host=host,
                 nav={"ongoing": "Ongoing", "completed": "Completed"}.get(st, "home"))
 
 
@@ -478,7 +562,10 @@ def search_page(ctx, q: str, host: str = "") -> str:
       <div class="res-head">{head}</div>
       {grid}
     </div>"""
-    return page(ctx, title=f"Search: {q}" if q else "Search", body=body, path="/search", host=host, nav="search")
+    sdesc = (f"Search results for “{q}” on Kdrama Heaven." if q
+             else "Search ongoing and completed K-dramas on Kdrama Heaven.")
+    return page(ctx, title=f"Search: {q}" if q else "Search", body=body, desc=sdesc,
+                path="/search", host=host, nav="search")
 
 
 def api_search(ctx, q: str) -> dict:
@@ -609,8 +696,15 @@ def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None,
         </div>
       </aside>
     </div>"""
-    desc = (d["synopsis"] or f"Watch {d['title']} episodes in 480p, 720p and 1080p on kdrama_heaven.")[:200]
-    return page(ctx, title=d["title"], body=body, desc=desc, image=d["poster"], path=drama_url(d), host=host)
+    desc = share_desc(d, quals)
+    image = d["poster"] if (d.get("poster") and is_http(d["poster"])) else None
+    watch = {
+        "id": d["id"], "title": d["title"], "url": drama_url(d),
+        "ep": sel["n"] if sel else None, "season": sea["n"] if sea else 1,
+        "h": hue(d), "i": initial(d), "poster": d["poster"] or "",
+    }
+    return page(ctx, title=d["title"], body=body, desc=desc, image=image, path=drama_url(d),
+                host=host, watch=watch)
 
 
 def not_found(ctx, host: str = "") -> str:

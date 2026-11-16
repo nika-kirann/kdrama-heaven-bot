@@ -36,6 +36,7 @@ An all-in-one Telegram bot for running the **kdrama_heaven** channel: drama card
 | `STORAGE_FLUSH_DELAY` | `3` | seconds of quiet before a backup upload |
 | `POSTER_CACHE_DIR` | (off) | optional local poster cache, e.g. `/tmp/posters` |
 | `PUBLIC_POSTERS` | `0` | posters on the public website. Off by default: dramas show gradient title tiles and `/poster/<id>.jpg` returns 404. `1` streams Telegram posters (no RAM cache) |
+| `PUBLIC_BASE_URL` | `https://kdramaheaven.in` | canonical public site origin for Open Graph / share URLs when the request Host is the Koyeb or Mistral origin. A Host or `X-Forwarded-Host` of `kdramaheaven.in` or `www` is used as-is (Cloudflare Worker proxy) |
 
 ## Commands
 **Admins (in a DM with the bot):**
@@ -108,10 +109,21 @@ The same process serves a private `/admin` panel (Telegram login code or passwor
 - **Silent import** is checked by default on bulk add: nothing is posted to the channel or group, and followers are not notified. The episodes still appear on the public website and in the bot. The same silent checkbox is on the single Add episode form and on Add drama (off by default there, so a new drama still posts its channel card unless you turn it on).
 
 ## Public website
-The same web process (same `PORT`) serves a read-only catalog for viewers: `/` (home: featured hero, latest updates, ongoing, completed),
+The same web process (same `PORT`) serves a read-only catalog for viewers: `/` (home: featured hero, continue watching, trending this week, new this week or latest updates, ongoing, completed),
 `/search?q=` (+ live suggestions from `/api/search`, rate-limited per IP), and `/drama/<id>` (seasons, episode grid,
 480p/720p/1080p buttons with Part/Mirror). Quality buttons go through `/go/<link_id>`, which logs a click like the bot does and
-redirects to the stored URL. Anything that isn't an http(s) URL opens the bot instead (`?start=drama_<id>`). **Website posters are separate from Telegram posters.** Give a drama a `web_poster_url` (admin Add or Edit details:
+redirects to the stored URL.
+The home page **Continue watching** row is stored in the visitor's `localStorage` only (last 10 dramas, no server storage)
+and appears after they open a drama page or a quality link. **Trending this week** ranks dramas by click counts from the
+last 7 days (SQL aggregate, cached with the 60s catalog snapshot) and is hidden when there are no clicks. **New this week**
+lists dramas with an episode added in the last 7 days, or newly created titles; it replaces **Latest updates** when there is
+weekly activity so the two rows don't repeat, and Latest updates comes back as the fallback when the week is quiet.
+Drama, home and search pages emit Open Graph and Twitter tags (`og:title`, `og:description`, `og:url`, `og:site_name`
+“Kdrama Heaven”, `twitter:card`). A drama's `og:image` is its website poster URL when set, otherwise a 1200×630 branded
+share image (`/static/og-default.jpg`). Absolute URLs use `PUBLIC_BASE_URL` (default `https://kdramaheaven.in`) when the
+request Host is localhost or the Koyeb/Mistral origin, and the request Host / `X-Forwarded-Host` when the visitor (or the
+Cloudflare Worker) presents `kdramaheaven.in` or `www`.
+Anything that isn't an http(s) URL opens the bot instead (`?start=drama_<id>`). **Website posters are separate from Telegram posters.** Give a drama a `web_poster_url` (admin Add or Edit details:
 "Website poster URL", with a live preview; or `/edit <id> webposter <url>`). The site then renders `<img src="that URL">` directly
 (`loading="lazy"`, `referrerpolicy="no-referrer"`) on cards, the hero, the drama backdrop and search suggestions. Only http(s) URLs
 without spaces or quotes are accepted, output is HTML-escaped, and **the server never downloads the image**, so it costs no server memory.

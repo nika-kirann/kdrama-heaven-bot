@@ -101,4 +101,105 @@
       const chip = $('a.epc[data-target="' + b.dataset.jump + '"]', grid); if (chip) show(chip, false);
     }));
   }
+
+  // Continue watching — localStorage only, last 10 dramas on this device.
+  const CW_KEY = 'kdh-continue', CW_MAX = 10;
+  const cwRead = () => {
+    try {
+      const v = JSON.parse(localStorage.getItem(CW_KEY) || '[]');
+      return Array.isArray(v) ? v : [];
+    } catch (e) { return []; }
+  };
+  const cwWrite = (items) => {
+    try { localStorage.setItem(CW_KEY, JSON.stringify(items.slice(0, CW_MAX))); }
+    catch (e) { /* private mode / full */ }
+  };
+  const cwSave = (entry) => {
+    if (!entry || entry.id == null) return;
+    const id = +entry.id;
+    const items = cwRead().filter(x => +x.id !== id);
+    items.unshift({
+      id, title: String(entry.title || ''), url: String(entry.url || ('/drama/' + id)),
+      ep: entry.ep == null || entry.ep === '' ? null : +entry.ep,
+      season: entry.season == null || entry.season === '' ? 1 : +entry.season,
+      poster: entry.poster || '', h: +entry.h || 270, i: entry.i || (entry.title || '?')[0],
+      ts: Date.now()
+    });
+    cwWrite(items);
+  };
+  const cwHref = (it) => {
+    const base = it.url || ('/drama/' + it.id);
+    if (it.ep == null) return base;
+    const s = it.season || 1;
+    const join = base.includes('?') ? '&' : '?';
+    return base + join + 's=' + s + '&ep=' + it.ep + '#episodes';
+  };
+  const cwRender = () => {
+    const sec = $('#continue'), track = $('#continue-track');
+    if (!sec || !track) return;
+    const items = cwRead().slice(0, CW_MAX);
+    if (!items.length) { sec.hidden = true; track.innerHTML = ''; return; }
+    track.innerHTML = items.map(it => {
+      const ep = it.ep != null ? 'Continue EP ' + it.ep : 'Continue';
+      const img = it.poster
+        ? '<img src="' + esc(it.poster) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">'
+        : '';
+      const letter = esc(it.i || (it.title || '?')[0] || '?');
+      return '<article class="card cw-card">' +
+        '<a href="' + esc(cwHref(it)) + '">' +
+          '<div class="pst" style="--h:' + (+it.h || 270) + '">' +
+            '<span class="pst-ph" aria-hidden="true">' + letter + '</span>' +
+            '<span class="pst-t">' + esc(it.title) + '</span>' + img + '</div>' +
+          '<div class="card-badges"><span class="cont">' + esc(ep) + '</span></div>' +
+          '<div class="card-body"><h3>' + esc(it.title) + '</h3><p>' + esc(ep) + '</p></div></a>' +
+        '<button type="button" class="cw-x" data-id="' + (+it.id) + '" aria-label="Remove ' + esc(it.title) + ' from continue watching">' +
+          '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></article>';
+    }).join('');
+    sec.hidden = false;
+  };
+  const main = $('#main');
+  if (main && main.dataset.watch) {
+    try { cwSave(JSON.parse(main.dataset.watch)); } catch (e) { /* ignore bad payload */ }
+  }
+  document.addEventListener('click', (e) => {
+    const go = e.target.closest('a[href^="/go/"]');
+    if (go) {
+      const panel = go.closest('.ep-panel');
+      if (panel && main && main.dataset.watch) {
+        try {
+          const cur = JSON.parse(main.dataset.watch);
+          const ep = panel.dataset.ep ? +panel.dataset.ep : cur.ep;
+          cwSave(Object.assign({}, cur, { ep: ep }));
+        } catch (err) { /* ignore */ }
+      }
+    }
+  });
+  if (grid) {
+    grid.addEventListener('click', (e) => {
+      const chip = e.target.closest('a.epc');
+      if (!chip || !main || !main.dataset.watch) return;
+      try {
+        const cur = JSON.parse(main.dataset.watch);
+        cwSave(Object.assign({}, cur, { ep: +chip.dataset.ep || cur.ep }));
+      } catch (err) { /* ignore */ }
+    });
+  }
+  const cwSec = $('#continue');
+  if (cwSec) {
+    cwRender();
+    cwSec.addEventListener('click', (e) => {
+      const x = e.target.closest('.cw-x');
+      if (x) {
+        e.preventDefault(); e.stopPropagation();
+        cwWrite(cwRead().filter(it => +it.id !== +x.dataset.id));
+        cwRender();
+        return;
+      }
+      if (e.target.closest('.cw-clear')) {
+        e.preventDefault();
+        cwWrite([]);
+        cwRender();
+      }
+    });
+  }
 })();
