@@ -1121,6 +1121,27 @@ class Database:
             activity[did] = at if prev is None or (at and at > prev) else prev
         return [did for did, _ in sorted(activity.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)[:limit]]
 
+    def sitemap_rows(self) -> list[dict]:
+        """id, title, lastmod for the public sitemap. One light query, no episode or link rows."""
+        alive = Drama.deleted.is_(False)
+        last_ep = (
+            select(Episode.drama_id.label("did"), func.max(Episode.created_at).label("last_ep"))
+            .group_by(Episode.drama_id)
+            .subquery()
+        )
+        with self.session() as s:
+            rows = s.execute(
+                select(Drama.id, Drama.title, Drama.updated_at, Drama.created_at, last_ep.c.last_ep)
+                .outerjoin(last_ep, last_ep.c.did == Drama.id)
+                .where(alive)
+                .order_by(Drama.id)
+            ).all()
+        out = []
+        for did, title, updated, created, ep_at in rows:
+            times = [t for t in (updated, created, ep_at) if t is not None]
+            out.append({"id": did, "title": title, "lastmod": max(times) if times else None})
+        return out
+
     def top_qualities(self, since: datetime | None = None, n: int = 3) -> list[tuple[str, int]]:
         with self.session() as s:
             q = select(Click.quality, func.count(Click.id).label("c"))

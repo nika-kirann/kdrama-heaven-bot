@@ -30,7 +30,7 @@
       box.innerHTML = res.map((r, i) =>
         '<a class="sug" role="option" href="' + esc(r.url) + '" data-i="' + i + '">' +
           '<div class="pst" style="--h:' + (+r.h || 270) + '"><span class="pst-ph">' + esc(r.i || (r.title || '?')[0].toUpperCase()) + '</span>' +
-          (r.poster ? '<img src="' + esc(r.poster) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '') + '</div>' +
+          (r.poster ? '<img src="' + esc(r.poster) + '" alt="' + esc(r.title) + ' poster" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '') + '</div>' +
           '<div><b>' + hl(r.title, q) + '</b><small>' + esc([r.year, r.eps].filter(Boolean).join(' · ')) + '</small></div>' +
           '<span class="spill ' + (r.status === 'Completed' ? 'done' : 'live') + '"><i></i>' + esc(r.status) + '</span></a>'
       ).join('') + '<a class="sug-all" href="/search?q=' + encodeURIComponent(q) + '">See all results for “' + esc(q) + '”</a>';
@@ -142,7 +142,7 @@
     track.innerHTML = items.map(it => {
       const ep = it.ep != null ? 'Continue EP ' + it.ep : 'Continue';
       const img = it.poster
-        ? '<img src="' + esc(it.poster) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">'
+        ? '<img src="' + esc(it.poster) + '" alt="' + esc(it.title) + ' poster" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">'
         : '';
       const letter = esc(it.i || (it.title || '?')[0] || '?');
       return '<article class="card cw-card">' +

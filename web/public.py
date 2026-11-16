@@ -20,8 +20,9 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from . import html as H
 
 log = logging.getLogger(__name__)
-ASSET_V = "9"
+ASSET_V = "10"
 CACHE_TTL = 60.0
+SITEMAP_TTL = 3600.0
 CATALOG_MAX = 3000       # dramas kept in the single cached snapshot (bounded memory)
 SYNOPSIS_MAX = 1500      # chars kept per synopsis
 DEFAULT_BOT = "kdrama_help_robot"
@@ -34,6 +35,7 @@ _ORIGIN_SUFFIXES = (".koyeb.app", ".mistral.run")
 
 _lock = threading.Lock()
 _cache: dict = {"key": None, "at": 0.0, "data": None}
+_sitemap: dict = {"key": None, "at": 0.0, "body": None}
 _rate: dict[str, deque] = {}
 RATE_N, RATE_WINDOW = 40, 10.0  # /api/search: 40 req / 10 s / IP
 
@@ -41,6 +43,7 @@ RATE_N, RATE_WINDOW = 40, 10.0  # /api/search: 40 req / 10 s / IP
 def invalidate() -> None:
     with _lock:
         _cache.update(key=None, at=0.0, data=None)
+        _sitemap.update(key=None, at=0.0, body=None)
 
 
 def rate_ok(ip: str, n: int | None = None, window: float | None = None) -> bool:
@@ -95,6 +98,17 @@ def public_origin(ctx, host: str = "") -> str:
     if hostname in _ORIGIN_HOSTS or any(hostname.endswith(s) for s in _ORIGIN_SUFFIXES):
         return env
     return "https://" + raw
+
+
+def canonical_origin(ctx) -> str:
+    """Always the configured public base (default https://kdramaheaven.in).
+
+    Canonical tags, the sitemap, robots.txt and JSON-LD use this so koyeb,
+    mistral and www hosts all point at the apex domain.
+    """
+    cfg = ctx.get("cfg") if ctx else None
+    env = (getattr(cfg, "public_base_url", None) or "https://kdramaheaven.in").strip().rstrip("/")
+    return env or "https://kdramaheaven.in"
 
 
 from utils import clean_web_poster  # noqa: E402  (website-only poster URL validation)
@@ -172,7 +186,8 @@ def _build(ctx) -> dict:
             "genres": [g.strip() for g in d["genres"].split(",") if g.strip()],
             "synopsis": d["synopsis"][:SYNOPSIS_MAX], "imdb": d["imdb"],
             "audio": d["audio"] or getattr(cfg, "default_audio", ""),
-            "poster": poster, "poster_ref": ref if (posters_on and not web_poster) else None,
+            "poster": poster, "web_poster": web_poster,
+            "poster_ref": ref if (posters_on and not web_poster) else None,
             "multi": multi, "cur": cur["n"] if cur else 1,
             "have": have, "total": tot, "next": nxt,
             "latest_at": latest_at, "latest_label": latest_label,
@@ -356,30 +371,165 @@ def search_box(q: str = "", big: bool = False, autofocus: bool = False) -> str:
             f'<div class="suggest" role="listbox" hidden></div></form>')
 
 
+def quality_phrase(quals: list[str] | None) -> str:
+    """'720p', '480p & 1080p', or '480p, 720p & 1080p' — only the qualities the drama has."""
+    qs = [q for q in (quals or []) if q]
+    if not qs:
+        return ""
+    if len(qs) == 1:
+        return qs[0]
+    if len(qs) == 2:
+        return f"{qs[0]} & {qs[1]}"
+    return ", ".join(qs[:-1]) + " & " + qs[-1]
+
+
+def drama_title_tag(title: str, quals: list[str] | None = None) -> str:
+    q = quality_phrase(quals)
+    if q:
+        return f"Watch {title} in {q} | {SITE_NAME}"
+    return f"Watch {title} | {SITE_NAME}"
+
+
 def share_desc(d, quals: list[str] | None = None) -> str:
-    """Open Graph description: status, episode count, qualities, then synopsis."""
-    bits = [x for x in [d.get("status") or "", progress(d)] if x]
-    if quals:
-        bits.append(", ".join(quals))
+    """Meta description: year (optional), status, episode count, qualities, then a short synopsis."""
+    bits = [x for x in [
+        str(d["year"]) if d.get("year") else "",
+        d.get("status") or "",
+        progress(d),
+    ] if x]
+    phrase = quality_phrase(quals)
+    if phrase:
+        bits.append(phrase)
     head = " · ".join(bits)
     syn = (d.get("synopsis") or "").strip()
     if syn:
         text = f"{head}. {syn}" if head else syn
     else:
-        text = f"Watch {d['title']} episodes in 480p, 720p and 1080p on Kdrama Heaven."
-        if head:
-            text = f"{head}. {text}"
+        watch = f"Watch {d['title']}" + (f" in {phrase}" if phrase else "") + f" on {SITE_NAME}."
+        text = f"{head}. {watch}" if head else watch
     return text[:300]
 
 
+def json_ld_tags(objs) -> str:
+    if not objs:
+        return ""
+    items = objs if isinstance(objs, list) else [objs]
+    out = []
+    for obj in items:
+        raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+        out.append(f'<script type="application/ld+json">{raw.replace("<", "\\u003c")}</script>')
+    return "".join(out)
+
+
+def tv_series_ld(d, quals, url: str) -> dict:
+    data = {
+        "@context": "https://schema.org",
+        "@type": "TVSeries",
+        "name": d["title"],
+        "description": share_desc(d, quals),
+        "url": url,
+    }
+    if d.get("web_poster") and is_http(d["web_poster"]):
+        data["image"] = d["web_poster"]
+    if d.get("have"):
+        data["numberOfEpisodes"] = int(d["have"])
+    if d.get("year"):
+        year = str(d["year"])
+        data["datePublished"] = year
+        data["startDate"] = year
+    return data
+
+
+def breadcrumb_ld(title: str, url: str, origin: str) -> dict:
+    return {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": origin + "/"},
+            {"@type": "ListItem", "position": 2, "name": title, "item": url},
+        ],
+    }
+
+
+def website_ld(origin: str) -> dict:
+    return {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": SITE_NAME,
+        "url": origin + "/",
+        "potentialAction": {
+            "@type": "SearchAction",
+            "target": origin + "/search?q={search_term_string}",
+            "query-input": "required name=search_term_string",
+        },
+    }
+
+
+def robots_txt(ctx) -> bytes:
+    base = canonical_origin(ctx)
+    return (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "Disallow: /admin\n"
+        "Disallow: /go/\n"
+        "Disallow: /api/\n"
+        f"Sitemap: {base}/sitemap.xml\n"
+    ).encode()
+
+
+def _xml(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _iso_date(dt) -> str:
+    if not dt:
+        return ""
+    if isinstance(dt, datetime) and dt.tzinfo:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.strftime("%Y-%m-%d")
+
+
+def sitemap_xml(ctx) -> bytes:
+    """Home + every live drama page. Cached ~1 hour; cleared on invalidate()."""
+    key = id(ctx.get("db"))
+    now = time.time()
+    with _lock:
+        if _sitemap["body"] is not None and _sitemap["key"] == key and now - _sitemap["at"] < SITEMAP_TTL:
+            return _sitemap["body"]
+    origin = canonical_origin(ctx)
+    rows = ctx["db"].sitemap_rows()
+    urls = [f"  <url><loc>{_xml(origin + '/')}</loc>"]
+    home_mod = max((r["lastmod"] for r in rows if r.get("lastmod")), default=None)
+    if home_mod:
+        urls[0] += f"<lastmod>{_iso_date(home_mod)}</lastmod>"
+    urls[0] += "</url>"
+    for r in rows:
+        loc = origin + drama_url(r)
+        entry = f"  <url><loc>{_xml(loc)}</loc>"
+        if r.get("lastmod"):
+            entry += f"<lastmod>{_iso_date(r['lastmod'])}</lastmod>"
+        urls.append(entry + "</url>")
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        + "\n".join(urls) + "\n</urlset>\n"
+    ).encode()
+    with _lock:
+        _sitemap.update(key=key, at=now, body=body)
+    return body
+
+
 def page(ctx, *, title: str, body: str, desc: str = "", image: str | None = None, path: str = "/",
-         host: str = "", nav: str = "", watch: dict | None = None) -> str:
+         host: str = "", nav: str = "", watch: dict | None = None, full_title: str | None = None,
+         robots: str | None = None, json_ld=None) -> str:
     bot, chan = bot_name(ctx), channel_handle(ctx)
     base = public_origin(ctx, host)
-    if title in {"kdrama_heaven", SITE_NAME}:
-        full_title = "Kdrama Heaven — Watch K-dramas in 480p, 720p & 1080p"
-    else:
-        full_title = f"{title} · {SITE_NAME}"
+    canon = canonical_origin(ctx)
+    if not full_title:
+        if title in {"kdrama_heaven", SITE_NAME}:
+            full_title = "Kdrama Heaven — Watch K-dramas in 480p, 720p & 1080p"
+        else:
+            full_title = f"{title} · {SITE_NAME}"
     desc = desc or "Browse ongoing and completed Korean dramas, pick an episode and choose 480p, 720p or 1080p. New episodes every week on Kdrama Heaven."
     if image and is_http(image):
         img = image
@@ -393,14 +543,15 @@ def page(ctx, *, title: str, body: str, desc: str = "", image: str | None = None
     watch_attr = ""
     if watch:
         watch_attr = f' data-watch="{e(json.dumps(watch, ensure_ascii=True, separators=(",", ":")))}"'
+    robots_tag = f'<meta name="robots" content="{e(robots)}">' if robots else ""
     navl = lambda k, href, label: f'<a href="{href}" class="{"on" if nav == k else ""}">{label}</a>'
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>{e(full_title)}</title>
-<meta name="description" content="{e(desc[:300])}">
+<meta name="description" content="{e(desc[:300])}">{robots_tag}
 <meta name="theme-color" content="#0b0918">
-<link rel="canonical" href="{e(base + path)}">
+<link rel="canonical" href="{e(canon + path)}">
 <meta property="og:type" content="website"><meta property="og:site_name" content="{SITE_NAME}">
 <meta property="og:title" content="{e(full_title)}"><meta property="og:description" content="{e(desc[:300])}">
 <meta property="og:url" content="{e(base + path)}">{og_img}
@@ -410,6 +561,7 @@ def page(ctx, *, title: str, body: str, desc: str = "", image: str | None = None
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap">
 <link rel="stylesheet" href="/static/public.css?v={ASSET_V}">
+{json_ld_tags(json_ld)}
 </head><body>
 <header class="hdr" id="hdr">
   <div class="hdr-in">
@@ -479,7 +631,7 @@ def home(ctx, status: str = "", host: str = "") -> str:
           <div class="hero-in">
             <div class="hero-txt">
               <div class="hero-kick">{status_pill(d['status'])}<span class="kick">Featured</span></div>
-              <h1>{e(d['title'])}</h1>
+              <p class="hero-title">{e(d['title'])}</p>
               <div class="hmeta">{meta}</div>
               <p class="hero-syn">{e(d['synopsis'][:240] + ('…' if len(d['synopsis']) > 240 else ''))}</p>
               <div class="hero-cta"><a class="btn pri" href="{drama_url(d)}#episodes">{ic('play')}Watch now</a>
@@ -518,6 +670,7 @@ def home(ctx, status: str = "", host: str = "") -> str:
                           ("completed", "Completed", len(completed))))
     grid = ("".join(card(d) for d in grid_items) if grid_items else "")
     body = f"""
+    <h1 class="sr-only">Kdrama Heaven</h1>
     {hero}
     <section class="search-band"><div class="wrap">
       <h2>Find your next K-drama</h2>
@@ -539,7 +692,8 @@ def home(ctx, status: str = "", host: str = "") -> str:
       </section>
     </div>"""
     return page(ctx, title="kdrama_heaven", body=body, path="/", host=host,
-                nav={"ongoing": "Ongoing", "completed": "Completed"}.get(st, "home"))
+                nav={"ongoing": "Ongoing", "completed": "Completed"}.get(st, "home"),
+                json_ld=website_ld(canonical_origin(ctx)))
 
 
 def search_page(ctx, q: str, host: str = "") -> str:
@@ -565,7 +719,8 @@ def search_page(ctx, q: str, host: str = "") -> str:
     sdesc = (f"Search results for “{q}” on Kdrama Heaven." if q
              else "Search ongoing and completed K-dramas on Kdrama Heaven.")
     return page(ctx, title=f"Search: {q}" if q else "Search", body=body, desc=sdesc,
-                path="/search", host=host, nav="search")
+                path="/search", host=host, nav="search",
+                robots="noindex,follow" if q else None)
 
 
 def api_search(ctx, q: str) -> dict:
@@ -668,7 +823,7 @@ def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None,
       <div class="wrap dhero-in">
         {poster_img(d, 'dpst', eager=True)}
         <div class="dinfo">
-          <a class="crumb" href="/">Home</a>
+          <nav aria-label="Breadcrumb"><a class="crumb" href="/">Home</a></nav>
           <h1>{e(d['title'])}</h1>
           <div class="gchips">{genres}</div>
           <p class="syn">{e(d['synopsis'])}</p>
@@ -703,8 +858,12 @@ def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None,
         "ep": sel["n"] if sel else None, "season": sea["n"] if sea else 1,
         "h": hue(d), "i": initial(d), "poster": d["poster"] or "",
     }
-    return page(ctx, title=d["title"], body=body, desc=desc, image=image, path=drama_url(d),
-                host=host, watch=watch)
+    origin = canonical_origin(ctx)
+    url = origin + drama_url(d)
+    return page(ctx, title=d["title"], full_title=drama_title_tag(d["title"], quals),
+                body=body, desc=desc, image=image, path=drama_url(d),
+                host=host, watch=watch,
+                json_ld=[tv_series_ld(d, quals, url), breadcrumb_ld(d["title"], url, origin)])
 
 
 def not_found(ctx, host: str = "") -> str:
@@ -715,7 +874,8 @@ def not_found(ctx, host: str = "") -> str:
       {search_box(big=True)}
       <a class="btn ghost" href="/">Back to home</a>
     </div>"""
-    return page(ctx, title="Page not found", body=body, path="/404", host=host)
+    return page(ctx, title="Page not found", body=body, path="/404", host=host,
+                robots="noindex,follow")
 
 
 # ---------------------------------------------------------------- link + poster delivery

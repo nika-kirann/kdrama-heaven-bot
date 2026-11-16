@@ -311,6 +311,7 @@ def _shell_head(title: str) -> str:
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#0c0a1a">
+<meta name="robots" content="noindex,nofollow">
 <title>{e(title)} · kdrama_heaven</title>
 {_FONT}
 <link rel="icon" href="/static/favicon-32.png?v={ASSET_V}" type="image/png" sizes="32x32">

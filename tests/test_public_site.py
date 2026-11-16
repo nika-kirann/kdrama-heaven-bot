@@ -483,8 +483,9 @@ def test_share_meta_tags_and_default_image(web):
     P.invalidate()
     body = raw(web, f"/drama/{b.id}")[2]
     assert 'property="og:site_name" content="Kdrama Heaven"' in body
-    assert 'property="og:title" content="Squid Game · Kdrama Heaven"' in body
+    assert 'property="og:title" content="Watch Squid Game in 480p &amp; 1080p | Kdrama Heaven"' in body
     assert "Squid Game (2021)" not in body
+    assert "<title>Watch Squid Game in 480p &amp; 1080p | Kdrama Heaven</title>" in body
     desc = re.search(r'property="og:description" content="([^"]*)"', body).group(1)
     assert "Ongoing" in desc and "EP" in desc and "480p" in desc and "1080p" in desc
     assert 'property="og:image" content="https://img.example/sg.jpg"' in body
@@ -523,3 +524,114 @@ def test_public_base_url_env(monkeypatch):
     assert Config().public_base_url == "https://www.kdramaheaven.in"
     monkeypatch.setenv("PUBLIC_BASE_URL", "")
     assert Config().public_base_url == "https://kdramaheaven.in"
+
+
+def test_seo_robots_sitemap_titles_and_json_ld(web):
+    a, b = seed(web.db)
+    web.db.update_drama(b.id, web_poster_url="https://img.example/sg.jpg", synopsis="Deadly games on an island.")
+    P.invalidate()
+
+    st, hdrs, body = raw(web, "/robots.txt")
+    assert st == 200 and hdrs["Content-Type"].startswith("text/plain")
+    assert "User-agent: *" in body and "Allow: /" in body
+    assert "Disallow: /admin" in body and "Disallow: /go/" in body and "Disallow: /api/" in body
+    assert "Sitemap: https://kdramaheaven.in/sitemap.xml" in body
+
+    st, hdrs, body = raw(web, "/sitemap.xml")
+    assert st == 200 and "xml" in hdrs["Content-Type"]
+    assert "max-age=3600" in hdrs["Cache-Control"]
+    assert "<loc>https://kdramaheaven.in/</loc>" in body
+    assert f"<loc>https://kdramaheaven.in/drama/{a.id}-lovely-runner</loc>" in body
+    assert f"<loc>https://kdramaheaven.in/drama/{b.id}-squid-game</loc>" in body
+    assert "<lastmod>" in body
+    web.db.mark_deleted(a.id)
+    P.invalidate()
+    body = raw(web, "/sitemap.xml")[2]
+    assert "lovely-runner" not in body and "squid-game" in body
+
+    # lastmod follows the latest episode when it is newer than the drama row
+    from datetime import datetime
+    from sqlalchemy import update
+    from db import Episode
+    with web.db.session() as s:
+        s.execute(update(Episode).where(Episode.drama_id == b.id).values(created_at=datetime(2099, 6, 15)))
+        s.commit()
+    P.invalidate()
+    sm = raw(web, "/sitemap.xml")[2]
+    chunk = sm.split(f"/drama/{b.id}-squid-game</loc>")[1].split("</url>")[0]
+    assert "<lastmod>2099-06-15</lastmod>" in chunk
+
+    body = raw(web, f"/drama/{b.id}")[2]
+    assert body.count("<h1") == 1 and "<h1>Squid Game</h1>" in body
+    assert "Squid Game (2021)" not in body
+    assert "<title>Watch Squid Game in 480p &amp; 1080p | Kdrama Heaven</title>" in body
+    assert f'rel="canonical" href="https://kdramaheaven.in/drama/{b.id}-squid-game"' in body
+    desc = re.search(r'<meta name="description" content="([^"]*)"', body).group(1)
+    assert "2021" in desc and "Ongoing" in desc and "EP" in desc and "Deadly games" in desc
+    assert "<h2>Episodes</h2>" in body and "<h3>Episode 1</h3>" in body
+    blocks = re.findall(r'<script type="application/ld\+json">(.*?)</script>', body, re.S)
+    assert blocks, "expected JSON-LD on the drama page"
+    objs = [json.loads(b) for b in blocks]
+    types = {o["@type"] for o in objs}
+    assert types == {"TVSeries", "BreadcrumbList"}
+    tv = next(o for o in objs if o["@type"] == "TVSeries")
+    assert tv["name"] == "Squid Game"
+    assert tv["image"] == "https://img.example/sg.jpg"
+    assert tv["numberOfEpisodes"] == 1
+    assert tv["datePublished"] == "2021" and tv["startDate"] == "2021"
+    assert tv["url"] == f"https://kdramaheaven.in/drama/{b.id}-squid-game"
+    crumbs = next(o for o in objs if o["@type"] == "BreadcrumbList")["itemListElement"]
+    assert crumbs[0]["item"] == "https://kdramaheaven.in/" and crumbs[1]["name"] == "Squid Game"
+
+    home = raw(web, "/")[2]
+    assert home.count("<h1") == 1 and "Kdrama Heaven" in re.search(r"<h1[^>]*>(.*?)</h1>", home, re.S).group(1)
+    assert 'rel="canonical" href="https://kdramaheaven.in/"' in home
+    assert "<title>Kdrama Heaven — Watch K-dramas in 480p, 720p &amp; 1080p</title>" in home
+    home_ld = json.loads(re.search(r'<script type="application/ld\+json">(.*?)</script>', home, re.S).group(1))
+    assert home_ld["@type"] == "WebSite"
+    assert home_ld["url"] == "https://kdramaheaven.in/"
+    assert home_ld["potentialAction"]["@type"] == "SearchAction"
+    assert home_ld["potentialAction"]["target"] == "https://kdramaheaven.in/search?q={search_term_string}"
+    # status filter still canonicalizes to the home URL
+    assert 'rel="canonical" href="https://kdramaheaven.in/"' in raw(web, "/?status=ongoing")[2]
+
+    search_q = raw(web, "/search?q=squid")[2]
+    assert 'name="robots" content="noindex,follow"' in search_q
+    assert "<title>Search: squid · Kdrama Heaven</title>" in search_q
+    search = raw(web, "/search")[2]
+    assert 'name="robots" content="noindex' not in search
+    assert "<title>Search · Kdrama Heaven</title>" in search
+    assert 'rel="canonical" href="https://kdramaheaven.in/search"' in search
+
+    login = raw(web, "/admin/login")[2]
+    assert 'name="robots" content="noindex,nofollow"' in login
+
+    # www / origin hosts canonicalize to the apex base URL
+    req = urllib.request.Request(web.base + f"/drama/{b.id}", headers={"X-Forwarded-Host": "www.kdramaheaven.in"})
+    op = urllib.request.build_opener(NoRedirect)
+    with op.open(req, timeout=5) as r:
+        www = r.read().decode("utf-8", "replace")
+    assert f'rel="canonical" href="https://kdramaheaven.in/drama/{b.id}-squid-game"' in www
+    assert f'property="og:url" content="https://www.kdramaheaven.in/drama/{b.id}-squid-game"' in www
+
+    # a single-quality title drops the unused ones
+    body = raw(web, f"/drama/{b.id}")[2]  # squid has 480p & 1080p; lovely was deleted
+    d = web.db.add_drama(title="Only HD", status="Completed", year=2022, total_episodes=1,
+                         episodes={1: [("720p", "https://cdn.x/hd.mkv", "part")]})
+    P.invalidate()
+    only = raw(web, f"/drama/{d.id}")[2]
+    assert "<title>Watch Only HD in 720p | Kdrama Heaven</title>" in only
+    assert "480p" not in only.split("<title>")[1].split("</title>")[0]
+
+
+def test_sitemap_is_cached_and_refreshed_on_invalidate(web, monkeypatch):
+    seed(web.db)
+    first = raw(web, "/sitemap.xml")[2]
+    # mutating the DB without invalidate should still serve the cached sitemap
+    extra = web.db.add_drama(title="Cache Miss", status="Ongoing",
+                             episodes={1: [("480p", "https://cdn.x/cm.mkv", "part")]})
+    cached = raw(web, "/sitemap.xml")[2]
+    assert cached == first and "cache-miss" not in cached
+    P.invalidate()
+    fresh = raw(web, "/sitemap.xml")[2]
+    assert f"/drama/{extra.id}-cache-miss" in fresh

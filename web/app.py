@@ -377,11 +377,14 @@ class AdminHandler(BaseHTTPRequestHandler):
             if icon.is_file():
                 return self._send(200, icon.read_bytes(), "image/png", "public, max-age=604800, immutable")
         if path == "/robots.txt":
-            return self._send(200, b"User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /go/\nDisallow: /api/\n",
+            return self._send(200, P.robots_txt(_CTX),
                               "text/plain; charset=utf-8", "public, max-age=86400")
         if "db" not in _CTX:
             return self._json(503, {"ok": False, "error": "starting"})
         try:
+            if path == "/sitemap.xml":
+                return self._send(200, P.sitemap_xml(_CTX),
+                                  "application/xml; charset=utf-8", "public, max-age=3600")
             if path == "/":
                 return self._page(200, P.home(_CTX, arg("status"), host))
             if path == "/search":
