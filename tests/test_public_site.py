@@ -46,6 +46,9 @@ def test_home_lists_rows_and_full_next_date(web):
         assert s in body
     assert "November 11, 2099" in body and "days" not in body.lower().split("<body")[1].replace("holidays", "")
     assert 'og:title' in body and 'rel="icon"' in body and "/static/public.css?v=" in body
+    assert 'alt="Kdrama Heaven"' in body
+    assert f"/static/logo.webp?v={P.ASSET_V}" in body and f"/static/logo.png?v={P.ASSET_V}" in body
+    assert f"/static/favicon-32.png?v={P.ASSET_V}" in body
     assert "t.me/kdrama_heaven" in body and "start=request" in body
     assert 'loading="lazy"' in body or "pst-ph" in body
     # status filter tabs (no category system)
@@ -149,6 +152,20 @@ def test_output_is_escaped_and_no_admin_data(web):
     assert "</script>" not in api and json.loads(api)["results"][0]["title"] == evil
     st, hdrs, _ = raw(web, "/static/public.css?v=1")
     assert st == 200 and "max-age" in hdrs["Cache-Control"]
+
+
+def test_logo_and_favicon_assets(web):
+    st, hdrs, _ = raw(web, f"/static/logo.webp?v={P.ASSET_V}")
+    assert st == 200 and hdrs["Content-Type"].startswith("image/webp")
+    assert "max-age=604800" in hdrs["Cache-Control"]
+    st, hdrs, _ = raw(web, f"/static/logo.png?v={P.ASSET_V}")
+    assert st == 200 and hdrs["Content-Type"].startswith("image/png")
+    st, hdrs, body = raw(web, "/favicon.ico")
+    assert st == 200 and "image/" in hdrs["Content-Type"] and "max-age=604800" in hdrs["Cache-Control"]
+    st, hdrs, _ = raw(web, "/apple-touch-icon.png")
+    assert st == 200 and hdrs["Content-Type"].startswith("image/png")
+    st, _, body = raw(web, "/admin/login")
+    assert st == 200 and 'alt="Kdrama Heaven"' in body and f"/static/logo.webp?v=" in body
 
 
 # ---------------- posters: streamed, never cached in RAM ----------------

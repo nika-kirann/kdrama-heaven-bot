@@ -20,7 +20,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from . import html as H
 
 log = logging.getLogger(__name__)
-ASSET_V = "7"
+ASSET_V = "8"
 CACHE_TTL = 60.0
 CATALOG_MAX = 3000       # dramas kept in the single cached snapshot (bounded memory)
 SYNOPSIS_MAX = 1500      # chars kept per synopsis
@@ -340,14 +340,14 @@ def page(ctx, *, title: str, body: str, desc: str = "", image: str | None = None
 <meta property="og:title" content="{e(full_title)}"><meta property="og:description" content="{e(desc[:300])}">
 <meta property="og:url" content="{e(base + path)}">{og_img}
 <meta name="twitter:card" content="{'summary_large_image' if img else 'summary'}">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="icon" href="/static/favicon-32.png?v={ASSET_V}" type="image/png" sizes="32x32"><link rel="icon" href="/favicon.ico?v={ASSET_V}" sizes="any"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v={ASSET_V}" sizes="180x180">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap">
 <link rel="stylesheet" href="/static/public.css?v={ASSET_V}">
 </head><body>
 <header class="hdr" id="hdr">
   <div class="hdr-in">
-    <a class="logo" href="/" aria-label="kdrama_heaven home"><span class="logo-mark">{ic("sparkle")}</span><span>kdrama<b>_heaven</b></span></a>
+    <a class="logo" href="/" aria-label="Kdrama Heaven home"><picture><source type="image/webp" srcset="/static/logo.webp?v={ASSET_V}"><img class="logo-img" src="/static/logo.png?v={ASSET_V}" alt="Kdrama Heaven" width="349" height="140" decoding="async"></picture></a>
     <nav class="hnav">{navl("home", "/", "Home")}{navl("Ongoing", "/?status=ongoing#browse", "Ongoing")}{navl("Completed", "/?status=completed#browse", "Completed")}</nav>
     <div class="hdr-r">
       <button type="button" class="icon-b" id="search-open" aria-label="Search">{ic("search")}</button>
@@ -648,13 +648,6 @@ def resolve_link(ctx, link_ref: str) -> tuple[str | None, dict | None]:
                                 return url, {"drama_id": d["id"], "episode": x["n"], "quality": g["q"],
                                              "season": s["n"], "log": first}
     return None, None
-
-
-def favicon_svg() -> bytes:
-    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'
-            '<stop offset="0" stop-color="#8b5cf6"/><stop offset="1" stop-color="#db2777"/></linearGradient></defs>'
-            '<rect width="64" height="64" rx="16" fill="url(#g)"/>'
-            '<path d="M32 12l4.4 13.1L49 29l-12.6 4.4L32 47l-4.4-13.6L15 29l12.6-3.9Z" fill="#fff"/></svg>').encode()
 
 
 # Posters are STREAMED, never held in memory: only file_id -> Telegram download URL is remembered

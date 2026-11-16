@@ -28,6 +28,13 @@ h1, h2, h3 { letter-spacing: -.02em; margin: 0; }
 .logo-mark { width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; color: #fff;
   background: linear-gradient(135deg, var(--p), #db2777); box-shadow: 0 8px 22px -8px rgba(139,92,246,.9); }
 .logo-mark .i { width: 18px; height: 18px; }
+.hdr .logo { flex: none; gap: 0; }
+.hdr .logo picture { display: block; }
+.hdr .logo-img { display: block; height: 42px; width: auto; max-width: min(220px, 52vw);
+  filter: drop-shadow(0 2px 6px rgba(0,0,0,.5)) drop-shadow(0 0 14px rgba(244,114,182,.16)); }
+@media (max-width: 479px) {
+  .hdr .logo-img { height: 36px; }
+}
 .hnav { display: none; gap: 4px; }
 .hnav a { padding: 7px 13px; border-radius: 999px; color: var(--muted); font-weight: 550; font-size: 14px; transition: color .2s, background .2s; }
 .hnav a:hover { color: var(--text); background: rgba(167,139,250,.08); }

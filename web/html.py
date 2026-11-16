@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import html as _h
 
-ASSET_V = "7"
+ASSET_V = "8"
 
 _FONT = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
          '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
@@ -312,6 +312,9 @@ def _shell_head(title: str) -> str:
 <meta name="theme-color" content="#0c0a1a">
 <title>{e(title)} · kdrama_heaven</title>
 {_FONT}
+<link rel="icon" href="/static/favicon-32.png?v={ASSET_V}" type="image/png" sizes="32x32">
+<link rel="icon" href="/favicon.ico?v={ASSET_V}" sizes="any">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v={ASSET_V}" sizes="180x180">
 <link rel="stylesheet" href="/admin/static/admin.css?v={ASSET_V}">
 </head>"""
 
@@ -341,8 +344,11 @@ def layout(title: str, body: str, *, nav: str = "dashboard", admin_id: int | Non
     return f"""{_shell_head(title)}<body class="app">
 <aside class="sidebar" id="sidebar">
   <a class="brand" href="/admin">
-    <span class="brand-mark">{icon("sparkle")}</span>
-    <span class="brand-text"><b>kdrama_heaven</b><small>Admin console</small></span>
+    <picture>
+      <source type="image/webp" srcset="/static/logo.webp?v={ASSET_V}">
+      <img class="brand-logo" src="/static/logo.png?v={ASSET_V}" alt="Kdrama Heaven" width="349" height="140" decoding="async">
+    </picture>
+    <span class="brand-text"><small>Admin console</small></span>
   </a>
   <div class="nav-label">Menu</div>
   <nav class="side-nav">{nav_html}</nav>
@@ -396,8 +402,12 @@ def login_page(*, has_password: bool, flash_msg: str | None = None, flash_kind: 
     return f"""{_shell_head("Login")}<body class="login-body">
 <div class="login-wrap">
   <section class="login-hero">
-    <div class="brand big"><span class="brand-mark">{icon("sparkle")}</span>
-      <span class="brand-text"><b>kdrama_heaven</b><small>Admin console</small></span></div>
+    <div class="brand big">
+      <picture>
+        <source type="image/webp" srcset="/static/logo.webp?v={ASSET_V}">
+        <img class="brand-logo" src="/static/logo.png?v={ASSET_V}" alt="Kdrama Heaven" width="349" height="140" decoding="async">
+      </picture>
+      <span class="brand-text"><small>Admin console</small></span></div>
     <h2>Run your K-drama channel<br><span class="grad">from one place.</span></h2>
     <ul class="hero-points">
       <li>{icon("film")}<span>Add dramas, seasons &amp; episodes</span></li>

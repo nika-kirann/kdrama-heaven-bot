@@ -321,10 +321,14 @@ class AdminHandler(BaseHTTPRequestHandler):
             self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers(); return
         data = path.read_bytes()
         ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        if path.suffix.lower() in {".png", ".webp", ".ico", ".jpg", ".jpeg", ".gif", ".svg"}:
+            cache = "public, max-age=604800, immutable"
+        else:
+            cache = "public, max-age=86400"  # assets are cache-busted with ?v=
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "public, max-age=86400")  # assets are cache-busted with ?v=
+        self.send_header("Cache-Control", cache)
         self.end_headers()
         self.wfile.write(data)
 
@@ -355,8 +359,14 @@ class AdminHandler(BaseHTTPRequestHandler):
         host = self._host()
         if path.startswith("/static/"):
             return self._static(path[len("/static/"):])
-        if path in {"/favicon.svg", "/favicon.ico"}:
-            return self._send(200, P.favicon_svg(), "image/svg+xml", "public, max-age=604800")
+        if path == "/favicon.ico":
+            ico = STATIC / "favicon.ico"
+            if ico.is_file():
+                return self._send(200, ico.read_bytes(), "image/x-icon", "public, max-age=604800, immutable")
+        if path in {"/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"}:
+            icon = STATIC / "apple-touch-icon.png"
+            if icon.is_file():
+                return self._send(200, icon.read_bytes(), "image/png", "public, max-age=604800, immutable")
         if path == "/robots.txt":
             return self._send(200, b"User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /go/\nDisallow: /api/\n",
                               "text/plain; charset=utf-8", "public, max-age=86400")

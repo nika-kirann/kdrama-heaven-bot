@@ -58,8 +58,11 @@ code { font-family: var(--mono); font-size: .92em; background: rgba(167,139,250,
   border-right: 1px solid var(--line);
   transition: transform .25s ease; overflow-y: auto;
 }
-.brand { display: flex; align-items: center; gap: 11px; padding: 6px 8px 18px; color: var(--text); }
+.brand { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 4px 8px 18px; color: var(--text); }
 .brand:hover { color: var(--text); }
+.brand picture { display: block; max-width: 100%; }
+.brand-logo { display: block; height: 42px; width: auto; max-width: 100%;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,.55)) drop-shadow(0 0 12px rgba(244,114,182,.16)); }
 .brand-mark {
   width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; flex: none;
   background: linear-gradient(135deg, var(--purple2), #c026d3); color: #fff;
@@ -427,7 +430,8 @@ details[open] .sum-chev { transform: rotate(90deg); }
   background-image: radial-gradient(rgba(255,255,255,.12) 1px, transparent 1px); background-size: 22px 22px;
   mask-image: linear-gradient(180deg, transparent, #000 40%, transparent); -webkit-mask-image: linear-gradient(180deg, transparent, #000 40%, transparent); }
 .login-hero > * { position: relative; z-index: 1; }
-.brand.big { padding: 0; }
+.brand.big { padding: 0; gap: 10px; }
+.brand.big .brand-logo { height: 76px; }
 .login-hero h2 { font-size: 40px; line-height: 1.12; margin: 0; font-weight: 800; letter-spacing: -.03em; }
 .grad { background: linear-gradient(90deg, #c4b5fd, #f472b6 60%, #f5c542); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .hero-points { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 12px; color: #d4cdf3; }
@@ -475,6 +479,8 @@ details[open] .sum-chev { transform: rotate(90deg); }
   .login-wrap { grid-template-columns: 1fr; }
   .login-hero { padding: 32px 24px 8px; background: transparent; border: 0; gap: 14px; }
   .login-hero h2, .hero-points, .login-hero::after { display: none; }
+  .brand.big { align-items: center; }
+  .brand.big .brand-logo { height: 56px; margin: 0 auto; }
   .login-card { margin: 16px 0 40px; }
 }
 @media (max-width: 640px) {
