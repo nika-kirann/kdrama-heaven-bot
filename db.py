@@ -330,6 +330,17 @@ class Database:
             hit = exact or s.scalars(q.where(Drama.title.ilike(f"%{ref}%")).order_by(Drama.id.desc())).first()
         return self.get_drama(hit) if hit else None
 
+    def get_episode(self, episode_id: int) -> Episode | None:
+        with self.session() as s:
+            ep = s.get(Episode, episode_id)
+            if ep:
+                _ = list(ep.links)
+                if ep.season is not None:
+                    _ = list(ep.season.episodes)
+                if ep.drama is not None:
+                    _ = list(ep.drama.seasons)
+            return ep
+
     def update_drama(self, drama_id: int, **fields) -> Drama:
         with self.session() as s:
             d = s.get(Drama, drama_id)
@@ -411,6 +422,102 @@ class Database:
             self._sync_drama(d)
             s.commit()
             return nums
+
+    def _materialize_legacy_links(self, s: Session, ep: Episode) -> None:
+        """Turn a legacy single-url episode into a real HD link row so its id can be kept."""
+        if not ep.links and ep.url:
+            ep.links.append(EpisodeLink(quality="HD", url=ep.url, kind="part", position=0))
+            s.flush()
+
+    def _apply_quality_links(self, ep: Episode, quality: str, new_items: list[tuple[str, str]]) -> None:
+        """Update links of one quality in place so existing EpisodeLink ids (and /go URLs) survive."""
+        current = [l for l in ep.links if l.quality == quality]
+        for i, (url, kind) in enumerate(new_items):
+            if i < len(current):
+                current[i].url = url
+                current[i].kind = kind or "part"
+            else:
+                pos = max((l.position for l in ep.links), default=-1) + 1
+                ep.links.append(EpisodeLink(quality=quality, url=url, kind=kind or "part", position=pos))
+        for l in current[len(new_items):]:
+            ep.links.remove(l)
+
+    def _sync_episode_url(self, ep: Episode) -> None:
+        for i, l in enumerate(ep.links):
+            l.position = i
+        ep.url = ep.links[0].url if ep.links else ""
+
+    def _replace_links_inplace(self, ep: Episode, final_links: list[tuple[str, str, str]]) -> None:
+        """Make ep.links match final_links, preserving ids at the same quality+index."""
+        by_q: dict[str, list[tuple[str, str]]] = {}
+        for q, url, kind in final_links:
+            by_q.setdefault(q, []).append((url, kind or "part"))
+        quals = []
+        for q, _, _ in final_links:
+            if q not in quals:
+                quals.append(q)
+        for l in ep.links:
+            if l.quality not in quals:
+                quals.append(l.quality)
+        for q in quals:
+            self._apply_quality_links(ep, q, by_q.get(q, []))
+        self._sync_episode_url(ep)
+
+    def update_episode_links(self, episode_id: int, links: list[tuple[str, str, str]], *,
+                             new_number: int | None = None,
+                             replace_qualities: set[str] | None = None) -> Episode:
+        """Update one episode's links in place. replace_qualities are fully replaced
+        (an empty list for a quality clears it). Qualities not in that set are left alone.
+        new_number may retitle the episode when that number is free in the same season."""
+        with self.session() as s:
+            ep = s.get(Episode, episode_id)
+            if not ep:
+                raise ValueError("Episode not found")
+            self._materialize_legacy_links(s, ep)
+            if new_number is not None and new_number != ep.number:
+                if not (1 <= new_number <= 9999):
+                    raise ValueError("Episode number must be 1–9999")
+                sea_eps = ep.season.episodes if ep.season is not None else [
+                    e for e in ep.drama.episodes if e.season_id == ep.season_id]
+                if any(e.id != ep.id and e.number == new_number for e in sea_eps):
+                    raise ValueError(f"Episode {new_number} already exists in this season")
+                ep.number = new_number
+            by_q: dict[str, list[tuple[str, str]]] = {}
+            for q, url, kind in links:
+                by_q.setdefault(q, []).append((url, kind or "part"))
+            quals = set(replace_qualities) if replace_qualities is not None else set(by_q)
+            for q in quals:
+                self._apply_quality_links(ep, q, by_q.get(q, []))
+            self._sync_episode_url(ep)
+            if not ep.links:
+                raise ValueError("At least one link is required")
+            s.commit()
+            eid = ep.id
+        return self.get_episode(eid)
+
+    def update_episodes_links(self, drama_id: int, season: int,
+                              planned: dict[int, list]) -> list[int]:
+        """Apply in-place link replacements to existing episodes of one season.
+        planned maps episode number -> the full final link list. Missing numbers are skipped.
+        Does not add episodes, change status, or touch next-air."""
+        changed: list[int] = []
+        with self.session() as s:
+            d = s.get(Drama, drama_id)
+            if not d:
+                raise ValueError("Drama not found")
+            sea = next((x for x in d.seasons if x.number == season), None)
+            if not sea:
+                raise ValueError("Invalid season")
+            by_num = {e.number: e for e in sea.episodes}
+            for n in sorted(planned):
+                ep = by_num.get(n)
+                if not ep or not planned[n]:
+                    continue
+                self._materialize_legacy_links(s, ep)
+                self._replace_links_inplace(ep, planned[n])
+                changed.append(n)
+            s.commit()
+        return changed
 
     def add_season(self, drama_id: int, total_episodes: int | None = None) -> Season:
         """Start the next season; drama becomes Ongoing; previous current season is left as-is."""

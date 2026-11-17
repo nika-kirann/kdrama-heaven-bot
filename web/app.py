@@ -17,8 +17,9 @@ from urllib.parse import parse_qs, urlparse
 from . import auth as authlib
 from . import html as H
 from . import public as P
-from .forms import (add_drama_links_section, add_episode_form, bulk_add_form,
-                    expand_quality_range, parse_paste_lines, plan_bulk, silent_checkbox)
+from .forms import (add_drama_links_section, add_episode_form, bulk_add_form, bulk_edit_form,
+                    collect_form_links, edit_episode_form, episode_link_tuples, expand_quality_range,
+                    parse_paste_lines, plan_bulk, plan_bulk_update, silent_checkbox)
 
 WEB_POSTER_ERR = "Website poster must be a plain http(s) image URL"
 
@@ -265,6 +266,12 @@ class AdminHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/admin/drama/(\d+)/bulk", path)
         if m:
             return self._bulk_get(admin, int(m.group(1)))
+        m = re.fullmatch(r"/admin/drama/(\d+)/links", path)
+        if m:
+            return self._links_get(admin, int(m.group(1)))
+        m = re.fullmatch(r"/admin/drama/(\d+)/episode/(\d+)", path)
+        if m:
+            return self._editep_get(admin, int(m.group(1)), int(m.group(2)))
         m = re.fullmatch(r"/admin/drama/(\d+)", path)
         if m:
             return self._drama_detail(admin, int(m.group(1)))
@@ -288,7 +295,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             "/admin/add": lambda: self._add_post(admin, fields, files),
             "/admin/drama/edit": lambda: self._edit_post(admin, fields, files),
             "/admin/drama/addep": lambda: self._addep_post(admin, fields),
+            "/admin/drama/editep": lambda: self._editep_post(admin, fields),
             "/admin/drama/bulk": lambda: self._bulk_post(admin, fields),
+            "/admin/drama/links": lambda: self._links_post(admin, fields),
             "/admin/drama/newseason": lambda: self._newseason_post(admin, fields),
             "/admin/drama/complete": lambda: self._complete_post(admin, fields),
             "/admin/drama/delete": lambda: self._delete_post(admin, fields),
@@ -734,10 +743,12 @@ class AdminHandler(BaseHTTPRequestHandler):
             eps_rows = "".join(
                 f"<tr><td><span class='ep-n'>EP {e.number}</span></td>"
                 f"<td><div class='pills'>{''.join(H.quality_pill(qq) for qq,_ in e.quality_groups())}</div></td>"
-                f"<td class='num muted'>{e.link_count} links</td></tr>" for e in sea.episodes
+                f"<td class='num muted'>{e.link_count} links</td>"
+                f"<td class='row-actions'><a class='btn ghost btn-sm' href='/admin/drama/{d.id}/episode/{e.id}'>"
+                f"{H.icon('pencil')}Edit</a></td></tr>" for e in sea.episodes
             )
             table = (f"<div class='table-wrap'><table class='table compact'><thead><tr><th>Ep</th><th>Quality</th>"
-                     f"<th>Links</th></tr></thead><tbody>{eps_rows}</tbody></table></div>" if eps_rows else
+                     f"<th>Links</th><th></th></tr></thead><tbody>{eps_rows}</tbody></table></div>" if eps_rows else
                      H.empty_state("tv", "No episodes yet", "Use Add episode above, or Bulk add for a range or a pasted list."))
             del_season = ("<form method='post' action='/admin/drama/delete'>" + csrf +
                           f"<input type='hidden' name='drama_id' value='{d.id}'><input type='hidden' name='season' value='{sea.number}'>"
@@ -749,6 +760,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 <div><h2>{heading} {H.status_badge(sea.status)}</h2>
                 <p class="muted">{len(sea.episodes)}{('/'+str(sea.total_episodes)) if sea.total_episodes else ''} eps</p></div></div>
                 <div class="actions">
+                  <a class="btn ghost btn-sm" href="/admin/drama/{d.id}/links?season={sea.number}">{H.icon('link')}Bulk edit links</a>
                   <a class="btn ghost btn-sm" href="/admin/drama/{d.id}/bulk?season={sea.number}">{H.icon('layers')}Bulk add</a>
                   <form method="post" action="/admin/drama/complete">{csrf}
                     <input type="hidden" name="drama_id" value="{d.id}">
@@ -1217,6 +1229,175 @@ class AdminHandler(BaseHTTPRequestHandler):
         note = " (silent)" if silent else ""
         self._redirect(f"/admin/drama/{did}?ok=" + quote(f"Episode {ep_n} added{note}") + f"#season-{season}")
 
+    def _editep_get(self, admin_id: int, drama_id: int, episode_id: int, *,
+                    err: str = "", values: dict | None = None):
+        db = _CTX["db"]
+        d = db.get_drama(drama_id)
+        ep = db.get_episode(episode_id)
+        if not d or d.deleted or not ep or ep.drama_id != d.id:
+            return self._html(404, H.layout("Missing", H.empty_state(
+                "tv", "Episode not found", "It may have been deleted.",
+                f"<a class='btn secondary' href='/admin/dramas'>{H.icon('arrow-left')}Back to dramas</a>"),
+                nav="dramas", admin_id=admin_id))
+        csrf = self._csrf(admin_id)
+        sea_n = ep.season.number if ep.season is not None else 1
+        form = edit_episode_form(d, ep, csrf, err=err, values=values)
+        sub = (f"Change, add, or remove links for <b>{H.e(d.title)}</b> · "
+               f"{'S' + str(sea_n) + ' ' if d.is_multi else ''}EP {ep.number}.")
+        actions = (f"<a class='btn secondary' href='/admin/drama/{d.id}/links?season={sea_n}'>"
+                   f"{H.icon('link')}Bulk edit links</a>")
+        body = f"""
+        {H.page_head("Edit episode links", sub, back=f"/admin/drama/{d.id}#season-{sea_n}", actions=actions)}
+        <div class="card" id="edit-episode">
+          <div class="card-head"><div class="card-ic">{H.icon("pencil")}</div>
+            <div><h2>EP {ep.number} links</h2>
+            <p class="muted">Empty a quality to remove it. Use ＋ Part / ＋ Mirror for extra URLs.
+              The episode number can be changed if that number is free in this season.</p></div></div>
+          {form}
+        </div>
+        """
+        self._html(200, H.layout(f"Edit EP {ep.number} · {d.title}", body, nav="dramas", admin_id=admin_id))
+
+    def _editep_post(self, admin_id: int, fields: dict):
+        from urllib.parse import quote
+        db = _CTX["db"]
+        did = int(_field(fields, "drama_id") or 0)
+        eid = int(_field(fields, "episode_id") or 0)
+        d = db.get_drama(did)
+        ep = db.get_episode(eid)
+        if not d or not ep or ep.drama_id != d.id:
+            return self._redirect("/admin/dramas?err=Missing")
+        raw_qs = [q.strip() for q in _field(fields, "qualities").split(",") if q.strip()]
+        quals = [q for q in raw_qs if re.fullmatch(r"[A-Za-z0-9]{1,20}", q)]
+        if not quals:
+            quals = ["480p", "720p", "1080p"]
+        links, err = collect_form_links(_field_list, fields, quals)
+        ep_s = _field(fields, "episode").strip()
+        if not ep_s.isdigit() or not (1 <= int(ep_s) <= 9999):
+            err = err or "Episode number required (1–9999)"
+        if not err and not links:
+            err = "At least one valid http(s) link is required"
+        values = {
+            "episode": ep_s,
+            "quality_values": {k: _field_list(fields, k) for q in quals for k in (q, f"{q}_mirror")},
+            "extra_qualities": [q for q in quals if q not in ("480p", "720p", "1080p")],
+        }
+        if err:
+            return self._editep_get(admin_id, did, eid, err=err, values=values)
+        new_number = int(ep_s)
+        try:
+            updated = db.update_episode_links(
+                eid, links, new_number=new_number, replace_qualities=set(quals))
+        except ValueError as e:
+            return self._editep_get(admin_id, did, eid, err=str(e), values=values)
+        sea_n = updated.season.number if updated.season is not None else 1
+        note = f"Episode {updated.number} links saved"
+        if new_number != ep.number:
+            note = f"Episode renumbered to {updated.number} and links saved"
+        self._redirect(f"/admin/drama/{did}?ok=" + quote(note) + f"#season-{sea_n}")
+
+    def _links_get(self, admin_id: int, drama_id: int, *, err: str = "", values: dict | None = None,
+                   plan: dict | None = None, flash: str | None = None, flash_kind: str = "ok"):
+        db = _CTX["db"]
+        d = db.get_drama(drama_id)
+        if not d or d.deleted:
+            return self._html(404, H.layout("Missing", H.empty_state(
+                "film", "Drama not found", "It may have been deleted.",
+                f"<a class='btn secondary' href='/admin/dramas'>{H.icon('arrow-left')}Back to dramas</a>"),
+                nav="dramas", admin_id=admin_id))
+        values = dict(values or {})
+        q = parse_qs(urlparse(self.path).query)
+        if "season" not in values and q.get("season"):
+            values["season"] = q.get("season", [""])[0]
+        csrf = self._csrf(admin_id)
+        form = bulk_edit_form(d, csrf, err=err, values=values, plan=plan, field_list=_field_list)
+        sub = f"Replace links on existing episodes of <b>{H.e(d.title)}</b> · #{d.id}."
+        actions = (f"<a class='btn secondary' href='/admin/drama/{d.id}/bulk'>"
+                   f"{H.icon('layers')}Bulk add</a>")
+        body = f"""
+        {H.page_head("Bulk edit links", sub, back=f"/admin/drama/{d.id}", actions=actions)}
+        <div class="card" id="bulk-edit-links">
+          <div class="card-head"><div class="card-ic">{H.icon("link")}</div>
+            <div><h2>Update existing episodes</h2>
+            <p class="muted">Only episodes already in this season are changed. New episode numbers are skipped.
+              Updates are always silent — nothing is posted to the channel or sent to followers.</p></div></div>
+          {form}
+        </div>
+        """
+        self._html(200, H.layout(f"Bulk edit links · {d.title}", body, nav="dramas", admin_id=admin_id,
+                                 flash_msg=flash, flash_kind=flash_kind))
+
+    def _plan_bulk_update(self, fields: dict, d):
+        """Parse the bulk-edit form into a plan. Returns (plan, error_or_None)."""
+        season_s = _field(fields, "season")
+        season = int(season_s) if season_s.isdigit() else (d.current.number if d.current else 1)
+        sea = d.season(season)
+        if not sea:
+            return None, "Invalid season"
+        existing = {e.number: episode_link_tuples(e) for e in sea.episodes}
+        mode = _field(fields, "mode", "range").strip().lower() or "range"
+        issues: list[dict] = []
+        if mode == "paste":
+            eps, issues = parse_paste_lines(_field(fields, "paste"))
+            errors = [i for i in issues if i.get("kind") == "error"]
+            if not eps:
+                msg = errors[0]["message"] if errors else "No valid episodes in the paste box"
+                plan = {"update": {}, "missing": [], "unchanged": [], "diffs": {}, "issues": issues,
+                        "season": season, "mode": mode, "clear_empty": _flag(fields, "clear_empty"),
+                        "incoming": {}}
+                return plan, msg
+        else:
+            eps, err = expand_quality_range(fields, _field, _field_list)
+            if err:
+                return None, err
+            if not eps:
+                return None, "Add a from/to range and at least one http(s) link template"
+        plan = plan_bulk_update(eps, existing, clear_empty=_flag(fields, "clear_empty"))
+        plan.update(issues=issues, season=season, mode=mode, clear_empty=_flag(fields, "clear_empty"))
+        return plan, None
+
+    def _links_values(self, fields: dict) -> dict:
+        return {
+            "season": _field(fields, "season"),
+            "mode": _field(fields, "mode", "range"),
+            "ep_from": _field(fields, "ep_from"),
+            "ep_to": _field(fields, "ep_to"),
+            "paste": _field(fields, "paste"),
+            "clear_empty": "1" if _flag(fields, "clear_empty") else "0",
+            "quality_values": {k: _field_list(fields, k)
+                               for q in ("480p", "720p", "1080p")
+                               for k in (q, f"{q}_mirror")},
+        }
+
+    def _links_post(self, admin_id: int, fields: dict):
+        from urllib.parse import quote
+        db = _CTX["db"]
+        did = int(_field(fields, "drama_id") or 0)
+        d = db.get_drama(did)
+        if not d or d.deleted:
+            return self._redirect("/admin/dramas?err=Missing")
+        action = _field(fields, "action", "preview").strip().lower() or "preview"
+        plan, err = self._plan_bulk_update(fields, d)
+        values = self._links_values(fields)
+        if err:
+            return self._links_get(admin_id, did, err=err, values=values, plan=plan)
+        if action != "apply":
+            return self._links_get(admin_id, did, values=values, plan=plan)
+        update = (plan or {}).get("update") or {}
+        if not update:
+            skipped = len((plan or {}).get("missing") or []) + len((plan or {}).get("unchanged") or [])
+            msg = ("Nothing to update — existing episodes already match, or those numbers are not in the database."
+                   if skipped else "Nothing to update")
+            return self._links_get(admin_id, did, err=msg, values=values, plan=plan)
+        season = plan["season"]
+        changed = db.update_episodes_links(did, season, update)
+        bits = [f"{len(changed)} updated"] if changed else []
+        if plan.get("unchanged"):
+            bits.append(f"{len(plan['unchanged'])} unchanged")
+        if plan.get("missing"):
+            bits.append(f"{len(plan['missing'])} not in database")
+        self._redirect(f"/admin/drama/{did}?ok=" + quote(f"Links saved · {', '.join(bits)}")
+                       + f"#season-{season}")
 
     def _bulk_get(self, admin_id: int, drama_id: int, *, err: str = "", values: dict | None = None,
                   plan: dict | None = None, flash: str | None = None, flash_kind: str = "ok"):

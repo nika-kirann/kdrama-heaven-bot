@@ -389,9 +389,16 @@ details[open] .sum-chev { transform: rotate(90deg); }
 .q-actions { display: flex; gap: 2px; flex-wrap: wrap; }
 .q-block .q-actions .btn { padding-left: 8px; padding-right: 8px; }
 .q-parts label, .q-mirrors label { margin: 10px 0 5px; font-size: 11.5px; color: var(--muted); }
+.q-row { margin-top: 10px; }
+.q-row:first-child { margin-top: 0; }
+.q-row label { margin: 0 0 5px; display: block; font-size: 11.5px; color: var(--muted); }
+.q-input { display: flex; gap: 6px; align-items: center; }
+.q-input .link { flex: 1; min-width: 0; }
+.q-remove { flex: 0 0 auto; width: 32px; padding-left: 0; padding-right: 0; font-size: 16px; line-height: 1; }
 .q-mirrors:empty { display: none; }
 .q-mirrors { margin-top: 4px; padding-top: 2px; border-top: 1px dashed var(--line); }
-#addep-form .q-block input, #add-links .q-block input { font-family: var(--mono); font-size: 12.5px; }
+#addep-form .q-block input, #add-links .q-block input,
+#editep-form .q-block input, #bulk-links-form .q-block input { font-family: var(--mono); font-size: 12.5px; }
 .ep-box { margin: 0; }
 .ep-box .hint { margin: 0 0 12px; }
 .ep-preview { margin: 0 0 12px; font-weight: 600; font-size: 13px; }
@@ -679,7 +686,19 @@ details[open] .sum-chev { transform: rotate(90deg); }
 .preview-table tbody tr.st-skip td { opacity: .7; }
 .preview-more td { text-align: center; color: var(--muted); font-size: 12.5px; font-style: italic; }
 .pill.neutral { background: rgba(167,139,250,.08); color: var(--muted); border-color: rgba(167,139,250,.18); }
-#bulk-live-preview:not([hidden]) { display: block; }
+#bulk-live-preview:not([hidden]), #bulk-links-live-preview:not([hidden]) { display: block; }
+td.row-actions { text-align: right; white-space: nowrap; width: 1%; }
+td.row-actions .btn { margin: 0; }
+.silent-note { margin: 14px 0 0; }
+.link-diff { display: grid; gap: 8px; }
+.diff-q { display: grid; gap: 3px; }
+.diff-urls { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 11.5px; }
+.diff-old { color: var(--dim); text-decoration: line-through; word-break: break-all; }
+.diff-new { color: #c4b5fd; word-break: break-all; }
+.diff-arrow { color: var(--muted); flex: 0 0 auto; }
+.diff-removed { color: var(--err); font-style: italic; }
+.preview-table tbody tr.st-missing td, .preview-table tbody tr.st-unchanged td { opacity: .8; }
 
 @media (max-width: 800px) {
   .opt-grid { grid-template-columns: 1fr; }

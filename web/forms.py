@@ -19,31 +19,38 @@ def next_ep(sea) -> int:
     return max((e.number for e in (sea.episodes if sea else [])), default=0) + 1
 
 
-def quality_blocks(prefix: str = "", values: dict | None = None) -> str:
-    """480p/720p/1080p blocks with Part 1 + ＋ Part / ＋ Mirror buttons.
+def _q_remove_btn() -> str:
+    return ('<button type="button" class="btn ghost btn-sm q-remove" '
+            'aria-label="Remove this link" title="Remove">×</button>')
+
+
+def _q_input_row(q: str, name: str, label: str, url: str, *, removable: bool) -> str:
+    rm = _q_remove_btn() if removable else ""
+    return (
+        f'<div class="q-row"><label>{H.e(label)}</label><div class="q-input">'
+        f'<input type="text" class="link" name="{H.e(name)}" value="{H.e(url)}" '
+        f'placeholder="https://…/{{ep}}.mkv" '
+        f'inputmode="url" autocomplete="off" spellcheck="false">'
+        f'{rm}</div></div>'
+    )
+
+
+def quality_blocks(prefix: str = "", values: dict | None = None, *,
+                   qualities: list[str] | tuple[str, ...] | None = None) -> str:
+    """Quality blocks with Part 1 + ＋ Part / ＋ Mirror buttons.
     prefix unused for now (names stay 480p / 480p_mirror so parsers stay shared).
     values: optional {"480p": ["url"], "480p_mirror": ["url"], ...} to prefill."""
     values = values or {}
     blocks = []
-    for q in QUALITIES:
+    for q in (qualities or QUALITIES):
         parts = [u for u in (values.get(q) or []) if u] or [""]
         part_html = []
         for i, url in enumerate(parts, 1):
-            part_html.append(
-                f'<label>{q} · Part {i}</label>'
-                f'<input type="text" class="link" name="{q}" value="{H.e(url)}" '
-                f'placeholder="https://…/{{ep}}.mkv" '
-                f'inputmode="url" autocomplete="off" spellcheck="false">'
-            )
+            part_html.append(_q_input_row(q, q, f"{q} · Part {i}", url, removable=i > 1))
         mirrors = [u for u in (values.get(f"{q}_mirror") or []) if u]
         mir_html = []
         for i, url in enumerate(mirrors, 1):
-            mir_html.append(
-                f'<label>{q} · Mirror {i}</label>'
-                f'<input type="text" class="link" name="{q}_mirror" value="{H.e(url)}" '
-                f'placeholder="https://…/{{ep}}.mkv" '
-                f'inputmode="url" autocomplete="off" spellcheck="false">'
-            )
+            mir_html.append(_q_input_row(q, f"{q}_mirror", f"{q} · Mirror {i}", url, removable=True))
         blocks.append(
             f'<div class="q-block" data-quality="{q}">'
             f'<div class="q-head"><div class="q-title">{H.quality_pill(q)}'
@@ -510,5 +517,353 @@ def bulk_add_form(d, csrf: str, *, err: str = "", values: dict | None = None,
         '<div class="form-foot">'
         f'<button class="btn secondary" type="submit" name="action" value="preview">{H.icon("search")}Preview import</button>'
         f'<button class="btn" type="submit" name="action" value="import" id="bulk-import-btn">{H.icon("plus")}Import episodes</button>'
+        '</div></form>'
+    )
+
+
+def link_values_from_episode(ep) -> tuple[dict, list[str]]:
+    """Prefill dict for quality_blocks, plus any qualities beyond the standard 480/720/1080."""
+    values: dict = {}
+    extras: list[str] = []
+    for q, ls in ep.quality_groups():
+        parts = [l.url for l in ls if (l.kind or "part") != "mirror"]
+        mirrors = [l.url for l in ls if l.kind == "mirror"]
+        values[q] = parts
+        values[f"{q}_mirror"] = mirrors
+        if q not in QUALITIES and q not in extras:
+            extras.append(q)
+    return values, extras
+
+
+def episode_link_tuples(ep) -> list[tuple[str, str, str]]:
+    """[(quality, url, kind), ...] in display order, including a legacy HD row."""
+    out: list[tuple[str, str, str]] = []
+    for q, ls in ep.quality_groups():
+        for l in ls:
+            out.append((l.quality, l.url, l.kind or "part"))
+    return out
+
+
+def collect_form_links(field_list, fields, qualities) -> tuple[list, str | None]:
+    """Parse 480p / 480p_mirror (etc.) fields into [(quality, url, kind), ...]."""
+    links: list[tuple[str, str, str]] = []
+    for q in qualities:
+        for url in field_list(fields, q):
+            if not url.lower().startswith(("http://", "https://")):
+                return [], f"Invalid {q} URL (need http/https)"
+            links.append((q, url, "part"))
+        for url in field_list(fields, f"{q}_mirror"):
+            if not url.lower().startswith(("http://", "https://")):
+                return [], f"Invalid {q} mirror URL"
+            links.append((q, url, "mirror"))
+    return links, None
+
+
+def edit_episode_form(d, ep, csrf: str, *, err: str = "", values: dict | None = None) -> str:
+    """Prefill the same quality form as Add episode, for editing one existing episode."""
+    values = dict(values or {})
+    qvals = values.get("quality_values")
+    extras = values.get("extra_qualities") or []
+    if qvals is None:
+        qvals, extras = link_values_from_episode(ep)
+    quals = list(QUALITIES) + [q for q in extras if q not in QUALITIES]
+    sea_n = ep.season.number if ep.season is not None else 1
+    ep_n = values.get("episode") or str(ep.number)
+    err_html = (
+        f'<div class="flash err inline" id="editep-err">{H.e(err)}</div>'
+        if err else
+        '<div class="flash err inline" id="editep-err" hidden></div>'
+    )
+    season_label = f"Season {sea_n}" if d.is_multi else "Season 1"
+    return (
+        f'<form method="post" action="/admin/drama/editep" id="editep-form">'
+        f'{csrf}'
+        f'<input type="hidden" name="drama_id" value="{d.id}">'
+        f'<input type="hidden" name="episode_id" value="{ep.id}">'
+        f'<input type="hidden" name="qualities" value="{H.e(",".join(quals))}">'
+        f'{err_html}'
+        '<div class="row narrow">'
+        f'<div><label>Season</label><input value="{H.e(season_label)}" disabled>'
+        f'<input type="hidden" name="season" value="{sea_n}"></div>'
+        '<div><label>Episode number</label>'
+        f'<input name="episode" id="editep-ep" value="{H.e(str(ep_n))}" '
+        'inputmode="numeric" required min="1" max="9999"></div>'
+        '</div>'
+        f'{quality_blocks(values=qvals, qualities=quals)}'
+        '<p class="muted silent-note">Saving only updates the database. Nothing is posted to the channel or group, '
+        "and followers are not notified. Public /go links keep the same id when a URL is changed.</p>"
+        '<div class="form-foot">'
+        f'<a class="btn secondary" href="/admin/drama/{d.id}#season-{sea_n}">{H.icon("arrow-left")}Cancel</a>'
+        f'<button class="btn" type="submit">{H.icon("save")}Save links</button>'
+        '</div></form>'
+    )
+
+
+def _group_links(links: list) -> dict[str, list]:
+    out: dict[str, list] = {}
+    for q, u, k in (links or []):
+        out.setdefault(q, []).append((q, u, k or "part"))
+    return out
+
+
+def plan_bulk_update(incoming: dict, existing: dict[int, list], *,
+                     clear_empty: bool = False,
+                     standard: tuple[str, ...] | list[str] = QUALITIES) -> dict:
+    """Plan link updates for existing episodes only.
+
+    Blank qualities stay as they are unless clear_empty is set (then standard
+    qualities missing from the incoming row are cleared). Episodes that are not
+    already in the database are reported as missing and never created.
+    """
+    update, missing, unchanged = {}, [], []
+    diffs: dict[int, dict] = {}
+    for n in sorted(incoming):
+        if n not in existing:
+            missing.append(n)
+            continue
+        cur = list(existing[n] or [])
+        cur_g = _group_links(cur)
+        new_g = _group_links(incoming[n])
+        quals: list[str] = list(standard)
+        for q in list(cur_g) + list(new_g):
+            if q not in quals:
+                quals.append(q)
+        final: list = []
+        changed_qs: list[str] = []
+        for q in quals:
+            if q in new_g:
+                nxt = new_g[q]
+            elif clear_empty and q in standard:
+                nxt = []
+            else:
+                nxt = cur_g.get(q, [])
+            if nxt != cur_g.get(q, []):
+                changed_qs.append(q)
+            final.extend(nxt)
+        if not changed_qs:
+            unchanged.append(n)
+        else:
+            update[n] = final
+            diffs[n] = {"old": cur, "new": final, "changed": changed_qs}
+    return {
+        "update": update, "missing": missing, "unchanged": unchanged,
+        "diffs": diffs, "clear_empty": clear_empty, "incoming": incoming,
+    }
+
+
+def _diff_quality_html(old_links: list, new_links: list, changed: list[str]) -> str:
+    """Per-quality old → new rows for qualities that actually change."""
+    old_g, new_g = _group_links(old_links), _group_links(new_links)
+    blocks = []
+    for q in changed:
+        olds = [H.e(u) for _, u, _ in old_g.get(q, [])]
+        news = [H.e(u) for _, u, _ in new_g.get(q, [])]
+        if not olds and not news:
+            continue
+        old_html = "<br>".join(f'<span class="diff-old" title="{u}">{u}</span>' for u in olds) or (
+            '<span class="diff-old muted">—</span>')
+        if news:
+            new_html = "<br>".join(f'<span class="diff-new" title="{u}">{u}</span>' for u in news)
+        else:
+            new_html = '<span class="diff-removed">removed</span>'
+        blocks.append(
+            f'<div class="diff-q">{H.quality_pill(q)}'
+            f'<div class="diff-urls">{old_html}<span class="diff-arrow">→</span>{new_html}</div></div>'
+        )
+    return '<div class="link-diff">' + "".join(blocks) + "</div>" if blocks else ""
+
+
+def preview_update_table_html(plan: dict, *, max_rows: int = 50) -> str:
+    """Server-side preview of a bulk link update (old → new per episode)."""
+    issues = plan.get("issues") or []
+    errors = [x for x in issues if x.get("kind") == "error"]
+    warns = [x for x in issues if x.get("kind") == "warn"]
+    update = plan.get("update") or {}
+    missing = plan.get("missing") or []
+    unchanged = plan.get("unchanged") or []
+    diffs = plan.get("diffs") or {}
+    incoming = plan.get("incoming") or {}
+    rows_data = []
+    for n, links in update.items():
+        rows_data.append((n, "update", diffs.get(n) or {"old": [], "new": links, "changed": []}))
+    for n in unchanged:
+        rows_data.append((n, "unchanged", None))
+    for n in missing:
+        rows_data.append((n, "missing", incoming.get(n)))
+    rows_data.sort(key=lambda r: r[0])
+    total = len(rows_data)
+    if total > max_rows:
+        head, tail = rows_data[: max_rows - 8], rows_data[-8:]
+        shown = head + [(None, "ellipsis", None)] + tail
+        hidden = total - len(head) - len(tail)
+    else:
+        shown, hidden = rows_data, 0
+
+    body = []
+    for n, status, payload in shown:
+        if status == "ellipsis":
+            body.append(
+                f'<tr class="preview-more"><td colspan="3">{hidden} more episodes not shown here '
+                "— they will still be updated.</td></tr>"
+            )
+            continue
+        if status == "update":
+            badge = '<span class="pill ok">will update</span>'
+            cell = _diff_quality_html(payload.get("old") or [], payload.get("new") or [],
+                                      payload.get("changed") or [])
+        elif status == "unchanged":
+            badge = '<span class="pill neutral">no change</span>'
+            cell = '<span class="muted">Links already match</span>'
+        else:
+            badge = '<span class="pill neutral">not in the database — skipped</span>'
+            cell = '<span class="muted">This episode is not in the season, so it will not be added.</span>'
+        body.append(
+            f'<tr class="st-{status}"><td><span class="ep-n">EP {n}</span></td>'
+            f'<td>{cell}</td><td>{badge}</td></tr>'
+        )
+    issue_html = ""
+    if errors or warns:
+        items = "".join(
+            f'<li class="{H.e(x["kind"])}">Line {x["line"]}: {H.e(x["message"])}'
+            + (f' <code>{H.e(x.get("text", "")[:80])}</code>' if x.get("text") else "")
+            + "</li>"
+            for x in (errors + warns)
+        )
+        issue_html = f'<ul class="preview-issues">{items}</ul>'
+    stats = []
+    if update:
+        stats.append(f'<span class="pill ok">{len(update)} will update</span>')
+    if unchanged:
+        stats.append(f'<span class="pill neutral">{len(unchanged)} no change</span>')
+    if missing:
+        stats.append(f'<span class="pill warn">{len(missing)} not in database</span>')
+    if errors:
+        stats.append(f'<span class="pill err">{len(errors)} line error{"s" if len(errors) != 1 else ""}</span>')
+    table = (
+        '<div class="table-wrap"><table class="table compact preview-table">'
+        "<thead><tr><th>Ep</th><th>Current → new</th><th>Status</th></tr></thead>"
+        f"<tbody>{''.join(body) or '<tr><td colspan=\"3\" class=\"muted\">Nothing to update.</td></tr>'}</tbody>"
+        "</table></div>"
+    )
+    return (
+        f'<div class="bulk-preview" id="bulk-server-preview">'
+        f'<div class="preview-head"><h3>Update preview</h3>'
+        f'<div class="pills">{"".join(stats)}</div></div>'
+        f'{issue_html}{table}</div>'
+    )
+
+
+def existing_links_payload(d) -> dict:
+    """Season-number -> episode-number -> [(quality, url, kind), ...] for live preview JS."""
+    out: dict[str, dict[str, list]] = {}
+    for sea in d.seasons:
+        out[str(sea.number)] = {
+            str(e.number): [[q, u, k] for q, u, k in episode_link_tuples(e)]
+            for e in sea.episodes
+        }
+    return out
+
+
+def bulk_edit_form(d, csrf: str, *, err: str = "", values: dict | None = None,
+                   plan: dict | None = None, field_list=None) -> str:
+    """Bulk replace links on episodes that already exist."""
+    values = values or {}
+    cur = d.current
+    default_sn = str(values.get("season") or (cur.number if cur else 1))
+    if d.is_multi or len(d.seasons) > 1:
+        opts = []
+        for sea in d.seasons:
+            sel = " selected" if str(sea.number) == default_sn else ""
+            cur_l = " (current)" if cur and sea.number == cur.number else ""
+            n = len(sea.episodes)
+            opts.append(
+                f'<option value="{sea.number}"{sel}>Season {sea.number}{cur_l} · '
+                f'{n} ep{"s" if n != 1 else ""}</option>'
+            )
+        season_html = (
+            '<div><label>Season</label>'
+            f'<select name="season" id="bulk-links-season">{"".join(opts)}</select></div>'
+        )
+    else:
+        season_html = (
+            f'<input type="hidden" name="season" id="bulk-links-season" value="{H.e(default_sn)}">'
+        )
+    mode = (values.get("mode") or "range").strip().lower()
+    if mode not in {"range", "paste"}:
+        mode = "range"
+    clear_on = values.get("clear_empty", False)
+    if isinstance(clear_on, str):
+        clear_on = clear_on.strip().lower() in {"1", "on", "true", "yes"}
+    qvals = values.get("quality_values") or {}
+    if field_list and not qvals:
+        qvals = _quality_values(field_list, values)
+    err_html = (
+        f'<div class="flash err inline" id="bulk-links-err">{H.e(err)}</div>'
+        if err else
+        '<div class="flash err inline" id="bulk-links-err" hidden></div>'
+    )
+    preview_html = preview_update_table_html(plan) if plan else (
+        '<div class="bulk-preview live" id="bulk-links-live-preview" hidden></div>'
+    )
+    if plan:
+        preview_html += '<div class="bulk-preview live" id="bulk-links-live-preview" hidden></div>'
+    ep_from = H.e(values.get("ep_from") or "")
+    ep_to = H.e(values.get("ep_to") or "")
+    paste = values.get("paste") or ""
+    clear_chk = " checked" if clear_on else ""
+    payload = json.dumps(existing_links_payload(d))
+    return (
+        f'<form method="post" action="/admin/drama/links" id="bulk-links-form" class="bulk-form" '
+        f"data-existing-links='{H.e(payload)}'>"
+        f'{csrf}'
+        f'<input type="hidden" name="drama_id" value="{d.id}">'
+        f'<input type="hidden" name="mode" id="bulk-links-mode" value="{H.e(mode)}">'
+        f'{err_html}'
+        '<div class="row narrow">'
+        f'{season_html}'
+        '</div>'
+        '<div class="tabs mode-tabs" role="tablist">'
+        f'<button type="button" class="{"active" if mode=="range" else ""}" data-bulk-tab="range" role="tab">Range templates</button>'
+        f'<button type="button" class="{"active" if mode=="paste" else ""}" data-bulk-tab="paste" role="tab">Paste list</button>'
+        '</div>'
+        f'<div id="bulk-links-range" class="bulk-pane" {"hidden" if mode!="range" else ""}>'
+        '<p class="muted hint">Put <code>{ep}</code> where the episode number goes. '
+        "Only episodes that already exist in this season are updated. "
+        "Leave a quality blank to keep its current links.</p>"
+        '<p class="ep-preview" id="bulk-links-range-hint" style="color:var(--gold)"></p>'
+        '<div class="row narrow">'
+        '<div><label>From episode</label>'
+        f'<input name="ep_from" id="bulk-links-from" value="{ep_from}" inputmode="numeric" min="1" placeholder="1"></div>'
+        '<div><label>To episode</label>'
+        f'<input name="ep_to" id="bulk-links-to" value="{ep_to}" inputmode="numeric" min="1" placeholder="16"></div>'
+        '</div>'
+        f'{quality_blocks(values=qvals)}'
+        '</div>'
+        f'<div id="bulk-links-paste" class="bulk-pane" {"hidden" if mode!="paste" else ""}>'
+        '<p class="muted hint">One episode per line. Columns are episode, then 480p, 720p, 1080p. '
+        "Empty columns leave that quality as it is (unless you tick Clear empty qualities). "
+        "Episodes that are not already in the database are skipped.</p>"
+        '<label for="bulk-links-paste-box">Episode list</label>'
+        f'<textarea name="paste" id="bulk-links-paste-box" rows="12" spellcheck="false" '
+        f'placeholder="12 | https://cdn.example/12-480.mkv | https://cdn.example/12-720.mkv | https://cdn.example/12-1080.mkv">{H.e(paste)}</textarea>'
+        '<p class="muted sm format-ex">Example: <code>ep | 480p link | 720p link | 1080p link</code></p>'
+        '</div>'
+        '<div class="opt-grid">'
+        '<div class="opt-card">'
+        '<div class="fs-title">Empty qualities</div>'
+        f'<label class="opt-check"><input type="checkbox" name="clear_empty" value="1"{clear_chk}>'
+        '<span class="opt-ui" aria-hidden="true"></span>'
+        '<span class="opt-copy"><strong>Clear empty qualities</strong>'
+        "<span class=\"muted\">If a quality is left blank (or an empty paste column), remove that quality from the episode.</span></span></label>"
+        '</div>'
+        '<div class="opt-card">'
+        '<div class="fs-title">Channel &amp; followers</div>'
+        '<p class="muted silent-note">Updates are always silent: no channel or group post, no follower DMs, '
+        "and the next-episode date is left as it is.</p>"
+        '</div></div>'
+        f'{preview_html}'
+        '<div class="form-foot">'
+        f'<button class="btn secondary" type="submit" name="action" value="preview">{H.icon("search")}Preview update</button>'
+        f'<button class="btn" type="submit" name="action" value="apply" id="bulk-links-apply-btn">{H.icon("save")}Update links</button>'
         '</div></form>'
     )
