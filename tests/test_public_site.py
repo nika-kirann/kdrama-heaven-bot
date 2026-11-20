@@ -104,6 +104,7 @@ def test_drama_page_quality_buttons_and_links(web):
     hrefs = re.findall(r'href="(/go/\d+)"', panel)
     st, hdrs, _ = raw(web, hrefs[0])
     assert st == 302 and hdrs["Location"] == "https://cdn.x/sg1-480.mkv"
+    assert hdrs.get("X-Robots-Tag") == "noindex, nofollow"
     targets = {raw(web, h)[1]["Location"] for h in hrefs}
     assert targets == {"https://cdn.x/sg1-480.mkv", "https://cdn.x/sg1-1080-p1.mkv",
                        "https://cdn.x/sg1-1080-p2.mkv", "https://mirror.x/sg1-1080.mkv"}
@@ -585,6 +586,7 @@ def test_seo_robots_sitemap_titles_and_json_ld(web):
 
     home = raw(web, "/")[2]
     assert home.count("<h1") == 1 and "Kdrama Heaven" in re.search(r"<h1[^>]*>(.*?)</h1>", home, re.S).group(1)
+    assert "google-site-verification" not in home
     assert 'rel="canonical" href="https://kdramaheaven.in/"' in home
     assert "<title>Kdrama Heaven — Watch K-dramas in 480p, 720p &amp; 1080p</title>" in home
     home_ld = json.loads(re.search(r'<script type="application/ld\+json">(.*?)</script>', home, re.S).group(1))
@@ -635,3 +637,26 @@ def test_sitemap_is_cached_and_refreshed_on_invalidate(web, monkeypatch):
     P.invalidate()
     fresh = raw(web, "/sitemap.xml")[2]
     assert f"/drama/{extra.id}-cache-miss" in fresh
+
+
+def test_google_site_verification_env(web, monkeypatch):
+    from config import Config
+    monkeypatch.delenv("GOOGLE_SITE_VERIFICATION", raising=False)
+    assert Config().google_site_verification == ""
+    monkeypatch.setenv("GOOGLE_SITE_VERIFICATION", "  abcDEF123_-xyz  ")
+    assert Config().google_site_verification == "abcDEF123_-xyz"
+
+    a, b = seed(web.db)
+    assert "google-site-verification" not in raw(web, "/")[2]
+
+    web.cfg.google_site_verification = "abcDEF123_-xyz"
+    home = raw(web, "/")[2]
+    assert '<meta name="google-site-verification" content="abcDEF123_-xyz">' in home
+    assert '<meta name="google-site-verification" content="abcDEF123_-xyz">' in raw(web, "/?status=ongoing")[2]
+    assert "google-site-verification" not in raw(web, "/search")[2]
+    assert "google-site-verification" not in raw(web, f"/drama/{b.id}")[2]
+
+    web.cfg.google_site_verification = '<script>alert(1)</script>'
+    assert "google-site-verification" not in raw(web, "/")[2]
+    web.cfg.google_site_verification = ""
+    assert "google-site-verification" not in raw(web, "/")[2]

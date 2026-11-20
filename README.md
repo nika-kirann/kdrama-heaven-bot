@@ -36,7 +36,8 @@ An all-in-one Telegram bot for running the **kdrama_heaven** channel: drama card
 | `STORAGE_FLUSH_DELAY` | `3` | seconds of quiet before a backup upload |
 | `POSTER_CACHE_DIR` | (off) | optional local poster cache, e.g. `/tmp/posters` |
 | `PUBLIC_POSTERS` | `0` | posters on the public website. Off by default: dramas show gradient title tiles and `/poster/<id>.jpg` returns 404. `1` streams Telegram posters (no RAM cache) |
-| `PUBLIC_BASE_URL` | `https://kdramaheaven.in` | canonical public site origin for Open Graph / share URLs when the request Host is the Koyeb or Mistral origin. A Host or `X-Forwarded-Host` of `kdramaheaven.in` or `www` is used as-is (Cloudflare Worker proxy) |
+| `PUBLIC_BASE_URL` | `https://kdramaheaven.in` | canonical public site origin for Open Graph / share URLs, canonical tags, the sitemap and robots.txt when the request Host is the Koyeb or Mistral origin. A Host or `X-Forwarded-Host` of `kdramaheaven.in` or `www` is used as-is for Open Graph (Cloudflare Worker proxy); canonical URLs always use this base |
+| `GOOGLE_SITE_VERIFICATION` | (empty) | optional Google Search Console HTML-tag token; when set, the home page includes `<meta name="google-site-verification">`. You can also verify with a Cloudflare DNS TXT record instead |
 
 ## Commands
 **Admins (in a DM with the bot):**
@@ -138,6 +139,7 @@ page use matching gradient backdrops. A website poster URL always takes priority
 The catalog index is cached for 60 s (capped at 3000 dramas, card fields only) and refreshed on admin edits. It is built from plain
 column selects plus `COUNT`/`MAX` aggregates, so no episode or link rows are loaded: about 0.5 MB kept and about 1 MB peak while
 rebuilding, for 300 dramas × 16 episodes. Episode links are read from the DB per drama page and never cached.
+Pages have unique `<title>` and meta descriptions (visible titles stay as the drama name, without `NAME (YEAR)`). Canonical URLs, `/robots.txt` (allows the catalog, disallows `/admin`, `/go/` and `/api/`, and points at the sitemap) and `/sitemap.xml` (home plus every live drama, with `lastmod`, cached about an hour and refreshed on admin edits) use `PUBLIC_BASE_URL`. Drama pages include JSON-LD `TVSeries` (image from the website poster URL when set) and a `BreadcrumbList`; the home page includes `WebSite` with a `SearchAction`. Admin pages and search-result URLs are `noindex`; `/go/` redirects send `X-Robots-Tag: noindex, nofollow`. After deploy, add `https://kdramaheaven.in` in Google Search Console, verify with a Cloudflare DNS TXT record or `GOOGLE_SITE_VERIFICATION`, and submit `https://kdramaheaven.in/sitemap.xml`.
 Uptime pingers and health checks should use `/healthz` (JSON); `/` is now the homepage.
 
 ## Tests

@@ -451,6 +451,15 @@ def breadcrumb_ld(title: str, url: str, origin: str) -> dict:
     }
 
 
+def google_verification_meta(ctx) -> str:
+    """Home-page Google Search Console HTML tag, if GOOGLE_SITE_VERIFICATION is set."""
+    cfg = ctx.get("cfg") if ctx else None
+    token = (getattr(cfg, "google_site_verification", None) or "").strip()
+    if not token or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", token):
+        return ""
+    return f'<meta name="google-site-verification" content="{e(token)}">'
+
+
 def website_ld(origin: str) -> dict:
     return {
         "@context": "https://schema.org",
@@ -544,12 +553,13 @@ def page(ctx, *, title: str, body: str, desc: str = "", image: str | None = None
     if watch:
         watch_attr = f' data-watch="{e(json.dumps(watch, ensure_ascii=True, separators=(",", ":")))}"'
     robots_tag = f'<meta name="robots" content="{e(robots)}">' if robots else ""
+    verify_tag = google_verification_meta(ctx) if path == "/" else ""
     navl = lambda k, href, label: f'<a href="{href}" class="{"on" if nav == k else ""}">{label}</a>'
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>{e(full_title)}</title>
-<meta name="description" content="{e(desc[:300])}">{robots_tag}
+<meta name="description" content="{e(desc[:300])}">{robots_tag}{verify_tag}
 <meta name="theme-color" content="#0b0918">
 <link rel="canonical" href="{e(canon + path)}">
 <meta property="og:type" content="website"><meta property="og:site_name" content="{SITE_NAME}">

@@ -63,6 +63,9 @@ class Config:
     # Host is the Koyeb/Mistral origin). Request Host / X-Forwarded-Host still wins
     # for kdramaheaven.in and www.
     public_base_url: str = field(default_factory=lambda: (os.getenv("PUBLIC_BASE_URL", "https://kdramaheaven.in").strip() or "https://kdramaheaven.in").rstrip("/"))
+    # Optional Google Search Console HTML-tag token. When set, the home page
+    # includes <meta name="google-site-verification" content="…">.
+    google_site_verification: str = field(default_factory=lambda: os.getenv("GOOGLE_SITE_VERIFICATION", "").strip())
 
     @property
     def brand_handle(self) -> str:

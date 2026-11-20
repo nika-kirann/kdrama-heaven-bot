@@ -428,6 +428,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.send_header("Location", url)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Robots-Tag", "noindex, nofollow")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
