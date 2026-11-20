@@ -61,6 +61,15 @@ class Drama(Base):
     def season(self, number: int) -> "Season | None":
         return next((x for x in self.seasons if x.number == number), None)
 
+    @property
+    def season_labeled(self) -> bool:
+        """Show season numbers when there is more than one season, or the only season is not 1."""
+        return len(self.seasons) > 1 or any(x.number != 1 for x in self.seasons)
+
+    @property
+    def first_season_number(self) -> int:
+        return min((x.number for x in self.seasons), default=1)
+
 
 class Season(Base):
     """One season of a drama. Episode numbers restart per season."""
@@ -261,11 +270,13 @@ class Database:
         self._backfill_seasons()
 
     def _backfill_seasons(self):
-        """Non-destructive: every drama without seasons gets Season 1; orphan episodes join it."""
+        """Non-destructive: dramas with no seasons at all get Season 1 (legacy data).
+        Dramas that already have a later season (e.g. only Season 2) are left alone.
+        Orphan episodes join the lowest existing season."""
         with self.engine.begin() as c:
             drama_ids = [r[0] for r in c.execute(text("SELECT id FROM dramas")).fetchall()]
             for did in drama_ids:
-                row = c.execute(text("SELECT id FROM seasons WHERE drama_id=:d AND number=1"),
+                row = c.execute(text("SELECT id FROM seasons WHERE drama_id=:d ORDER BY number ASC LIMIT 1"),
                                 {"d": did}).fetchone()
                 if row:
                     sid = row[0]
@@ -276,7 +287,7 @@ class Database:
                                    "VALUES (:d, 1, :st, :tot, CURRENT_TIMESTAMP)"),
                               {"d": did, "st": (st[0] if st else "Ongoing") or "Ongoing",
                                "tot": st[1] if st else None})
-                    sid = c.execute(text("SELECT id FROM seasons WHERE drama_id=:d AND number=1"),
+                    sid = c.execute(text("SELECT id FROM seasons WHERE drama_id=:d ORDER BY number ASC LIMIT 1"),
                                     {"d": did}).fetchone()[0]
                 c.execute(text("UPDATE episodes SET season_id=:s WHERE drama_id=:d AND "
                                "(season_id IS NULL OR season_id=0)"), {"s": sid, "d": did})
@@ -296,15 +307,20 @@ class Database:
         episodes = kw.pop("episodes", None) or {start + i: [("HD", u, "part")] for i, u in enumerate(links)}
         total = kw.get("total_episodes")
         status = kw.get("status", "Ongoing")
+        from utils import parse_season_number
+        try:
+            season_n = parse_season_number(kw.pop("season", None), default=1) or 1
+        except ValueError:
+            season_n = 1
         with self.session() as s:
             d = Drama(**kw)
             s.add(d)
             s.flush()
-            s.add(Season(drama_id=d.id, number=1, status=status, total_episodes=total))
+            s.add(Season(drama_id=d.id, number=season_n, status=status, total_episodes=total))
             s.commit()
             did = d.id
         if episodes:
-            self.add_episodes(did, episodes, season=1)
+            self.add_episodes(did, episodes, season=season_n)
         return self.get_drama(did)
 
     def get_drama(self, drama_id: int) -> Drama | None:
@@ -357,19 +373,30 @@ class Database:
         return self.get_drama(drama_id)
 
     def _ensure_season(self, s: Session, d: Drama, number: int | None = None) -> Season:
-        """Return the named season (default: current / Season 1), creating Season 1 if somehow missing."""
+        """Return the named season (default: current). Creates the named season if it
+        is missing. Does not invent Season 1 when a later season is requested."""
+        if number is not None:
+            number = int(number)
+            if not 1 <= number <= 99:
+                raise ValueError("Season must be 1–99")
         if not d.seasons:
-            sea = Season(drama_id=d.id, number=1, status=d.status or "Ongoing",
+            sea = Season(drama_id=d.id, number=number or 1, status=d.status or "Ongoing",
                          total_episodes=d.total_episodes)
             s.add(sea)
             s.flush()
             d.seasons.append(sea)
+            if number is None:
+                return sea
         if number is None:
             ongoing = [x for x in d.seasons if x.status == "Ongoing"]
             return max(ongoing or d.seasons, key=lambda x: x.number)
         sea = next((x for x in d.seasons if x.number == number), None)
         if not sea:
-            raise ValueError(f"no season {number}")
+            sea = Season(drama_id=d.id, number=number, status="Ongoing", total_episodes=None)
+            s.add(sea)
+            s.flush()
+            d.seasons.append(sea)
+            self._sync_drama(d)
         return sea
 
     def _sync_drama(self, d: Drama) -> None:
@@ -519,11 +546,21 @@ class Database:
             s.commit()
         return changed
 
-    def add_season(self, drama_id: int, total_episodes: int | None = None) -> Season:
-        """Start the next season; drama becomes Ongoing; previous current season is left as-is."""
+    def add_season(self, drama_id: int, total_episodes: int | None = None,
+                   number: int | None = None) -> Season:
+        """Start a season. number=None starts the next one after the highest that exists.
+        An explicit number may skip (e.g. Season 3 with no Season 2) and may be the
+        first season of a drama (e.g. only Season 2)."""
         with self.session() as s:
             d = s.get(Drama, drama_id)
-            n = max((x.number for x in d.seasons), default=0) + 1
+            if number is None:
+                n = max((x.number for x in d.seasons), default=0) + 1
+            else:
+                n = int(number)
+                if not 1 <= n <= 99:
+                    raise ValueError("Season must be 1–99")
+                if any(x.number == n for x in d.seasons):
+                    raise ValueError(f"Season {n} already exists")
             sea = Season(drama_id=d.id, number=n, status="Ongoing", total_episodes=total_episodes)
             s.add(sea)
             d.seasons.append(sea)

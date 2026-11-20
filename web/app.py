@@ -19,7 +19,7 @@ from . import html as H
 from . import public as P
 from .forms import (add_drama_links_section, add_episode_form, bulk_add_form, bulk_edit_form,
                     collect_form_links, edit_episode_form, episode_link_tuples, expand_quality_range,
-                    parse_paste_lines, plan_bulk, plan_bulk_update, silent_checkbox)
+                    parse_form_season, parse_paste_lines, plan_bulk, plan_bulk_update, silent_checkbox)
 
 WEB_POSTER_ERR = "Website poster must be a plain http(s) image URL"
 
@@ -664,6 +664,11 @@ class AdminHandler(BaseHTTPRequestHandler):
             if d.current.total_episodes:
                 eps += f"/{d.current.total_episodes}"
             return eps
+        if getattr(d, "season_labeled", False) and d.current:
+            eps = f"S{d.current.number} {len(d.current.episodes)}"
+            if d.current.total_episodes:
+                eps += f"/{d.current.total_episodes}"
+            return eps + " eps"
         eps = f"{len(d.episodes)}" + (f"/{d.total_episodes}" if d.total_episodes else "")
         return eps + " eps"
 
@@ -743,7 +748,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         form_err = q.get("addep_err", [None])[0] or ""
         seasons_html = ""
         for sea in d.seasons:
-            heading = f"Season {sea.number}" if d.is_multi else "Episodes"
+            heading = f"Season {sea.number}" if (d.is_multi or getattr(d, "season_labeled", False)) else "Episodes"
             eps_rows = "".join(
                 f"<tr><td><span class='ep-n'>EP {e.number}</span></td>"
                 f"<td><div class='pills'>{''.join(H.quality_pill(qq) for qq,_ in e.quality_groups())}</div></td>"
@@ -769,7 +774,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                   <form method="post" action="/admin/drama/complete">{csrf}
                     <input type="hidden" name="drama_id" value="{d.id}">
                     <input type="hidden" name="season" value="{sea.number}">
-                    <button class="btn secondary btn-sm" type="submit" {"disabled" if sea.status=="Completed" else ""}>{H.icon('check')}Complete{" season" if d.is_multi else ""}</button>
+                    <button class="btn secondary btn-sm" type="submit" {"disabled" if sea.status=="Completed" else ""}>{H.icon('check')}Complete{" season" if (d.is_multi or getattr(d, "season_labeled", False)) else ""}</button>
                   </form>
                   {del_season}
                 </div>
@@ -789,6 +794,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             facts.append(f"<span>{H.icon('info')}{H.e(d.audio)}</span>")
         if d.is_multi:
             facts.append(f"<span>{H.icon('layers')}{len(d.seasons)} seasons</span>")
+        elif getattr(d, "season_labeled", False) and d.current:
+            facts.append(f"<span>{H.icon('layers')}Season {d.current.number}</span>")
         facts.append(f"<span>{H.icon('tv')}{H.e(self._eps_text(d))}</span>")
         if d.next_ep_date:
             facts.append(f"<span>{H.icon('clock')}Next: {H.e(d.next_ep_date)}{' ' + H.e(d.air_time) if d.air_time else ''}</span>")
@@ -806,10 +813,12 @@ class AdminHandler(BaseHTTPRequestHandler):
             </div>
           </div>
           <div class="hero-actions">
-            <form method="post" action="/admin/drama/newseason" class="inline-form">{csrf}
+            <form method="post" action="/admin/drama/newseason" class="inline-form add-season-form">{csrf}
               <input type="hidden" name="drama_id" value="{d.id}">
-              <input name="total" placeholder="S{len(d.seasons)+1} total eps" inputmode="numeric" class="w-sm">
-              <button class="btn gold" type="submit">{H.icon('plus')}New season</button>
+              <input name="season" value="{max((x.number for x in d.seasons), default=0) + 1}" inputmode="numeric" min="1" max="99" class="w-sm" aria-label="Season number" title="Season number. You can skip, for example start at 2 or jump to 3.">
+              <input name="total" placeholder="Total eps" inputmode="numeric" class="w-sm" aria-label="Total episodes">
+              <label class="silent-mini"><input type="checkbox" name="silent" value="1"> Silent</label>
+              <button class="btn gold" type="submit">{H.icon('plus')}Add season</button>
             </form>
             <form method="post" action="/admin/drama/complete">{csrf}
               <input type="hidden" name="drama_id" value="{d.id}">
@@ -879,7 +888,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         links_err = q.get("links_err", [None])[0] or ""
         flash = err if err and not links_err else None
         body = f"""
-        {H.page_head("Add drama", "Creates Season 1 and posts the channel card (same as /add), unless you create silently.", back="/admin/dramas")}
+        {H.page_head("Add drama", "Pick the season these links belong to (Season 1 by default). You can start at Season 2 or 3 with no Season 1. Posts the channel card unless you create silently.", back="/admin/dramas")}
         <form method="post" action="/admin/add" enctype="multipart/form-data" id="add-drama-form" class="form-grid">
           {csrf}
           <div class="card">
@@ -890,6 +899,8 @@ class AdminHandler(BaseHTTPRequestHandler):
               <div><label>Year</label><input name="year" inputmode="numeric" placeholder="2026"></div>
               <div><label>Status</label>
                 <select name="status"><option>Ongoing</option><option>Completed</option></select></div>
+              <div><label>Season</label>
+                <input name="season" id="add-season" value="1" inputmode="numeric" min="1" max="99" required></div>
               <div><label>Total episodes</label>
                 <input name="total" id="add-total" inputmode="numeric" placeholder="16"></div>
             </div>
@@ -915,8 +926,8 @@ class AdminHandler(BaseHTTPRequestHandler):
           </div>
           <div class="card">
             <div class="card-head"><div class="card-ic gold">{H.icon('link')}</div>
-              <div><h2>Season 1 episodes <span class="muted">(optional)</span></h2>
-              <p class="muted">Bulk-create episodes from link templates</p></div></div>
+              <div><h2 id="add-season-heading">Season 1 episodes <span class="muted">(optional)</span></h2>
+              <p class="muted">Bulk-create episodes from link templates. They are saved in the season you picked above.</p></div></div>
             {add_drama_links_section(err=links_err)}
           </div>
           <div class="sticky-foot add-foot">
@@ -938,7 +949,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         for r in rows:
             d = db.get_drama(r.drama_id)
             title = d.title if d else f"#{r.drama_id}"
-            sea = f"S{r.season} " if r.season and d and d.is_multi else ""
+            sea = f"S{r.season} " if r.season and d and (d.is_multi or getattr(d, "season_labeled", False) or r.season > 1) else ""
             ep = f"{sea}EP {r.episode}" if r.episode else (sea.strip() or "—")
             reason = self._reason(r.reason)
             who = f"@{r.username}" if r.username else str(r.user_id)
@@ -1099,6 +1110,11 @@ class AdminHandler(BaseHTTPRequestHandler):
         total = _field(fields, "total").strip()
         if total.isdigit():
             kw["total_episodes"] = int(total)
+        from utils import parse_season_number
+        try:
+            kw["season"] = parse_season_number(_field(fields, "season"), default=1) or 1
+        except ValueError as e:
+            return self._redirect("/admin/add?err=" + quote(str(e)))
         wp_raw = _field(fields, "web_poster_url").strip()
         if wp_raw and not P.clean_web_poster(wp_raw):
             return self._redirect("/admin/add?err=" + quote(WEB_POSTER_ERR))
@@ -1207,11 +1223,9 @@ class AdminHandler(BaseHTTPRequestHandler):
         d = db.get_drama(did)
         if not d:
             return self._redirect("/admin/dramas?err=Missing")
-        season_s = _field(fields, "season")
-        season = int(season_s) if season_s.isdigit() else (d.current.number if d.current else 1)
-        sea = d.season(season)
-        if not sea:
-            return self._redirect(f"/admin/drama/{did}?addep_err=" + quote("Invalid season"))
+        season, sea_err = parse_form_season(fields, _field, d, allow_new=True)
+        if sea_err:
+            return self._redirect(f"/admin/drama/{did}?addep_err=" + quote(sea_err))
         ep_s = _field(fields, "episode").strip()
         if not ep_s.isdigit() or not (1 <= int(ep_s) <= 9999):
             return self._redirect(f"/admin/drama/{did}?addep_err=" + quote("Episode number required (1–9999)"))
@@ -1247,7 +1261,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         sea_n = ep.season.number if ep.season is not None else 1
         form = edit_episode_form(d, ep, csrf, err=err, values=values)
         sub = (f"Change, add, or remove links for <b>{H.e(d.title)}</b> · "
-               f"{'S' + str(sea_n) + ' ' if d.is_multi else ''}EP {ep.number}.")
+               f"{'S' + str(sea_n) + ' ' if (d.is_multi or sea_n != 1) else ''}EP {ep.number}.")
         actions = (f"<a class='btn secondary' href='/admin/drama/{d.id}/links?season={sea_n}'>"
                    f"{H.icon('link')}Bulk edit links</a>")
         body = f"""
@@ -1333,8 +1347,9 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def _plan_bulk_update(self, fields: dict, d):
         """Parse the bulk-edit form into a plan. Returns (plan, error_or_None)."""
-        season_s = _field(fields, "season")
-        season = int(season_s) if season_s.isdigit() else (d.current.number if d.current else 1)
+        season, sea_err = parse_form_season(fields, _field, d, allow_new=False)
+        if sea_err:
+            return None, sea_err
         sea = d.season(season)
         if not sea:
             return None, "Invalid season"
@@ -1362,7 +1377,7 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def _links_values(self, fields: dict) -> dict:
         return {
-            "season": _field(fields, "season"),
+            "season": (_field(fields, "new_season") if _field(fields, "season") == "__new__" else _field(fields, "season")),
             "mode": _field(fields, "mode", "range"),
             "ep_from": _field(fields, "ep_from"),
             "ep_to": _field(fields, "ep_to"),
@@ -1436,12 +1451,12 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def _plan_bulk(self, fields: dict, d):
         """Parse the bulk form into a plan. Returns (plan, error_or_None)."""
-        season_s = _field(fields, "season")
-        season = int(season_s) if season_s.isdigit() else (d.current.number if d.current else 1)
+        season, sea_err = parse_form_season(fields, _field, d, allow_new=True)
+        if sea_err:
+            return None, sea_err
+        # A new season number is allowed; the season row is created on apply.
         sea = d.season(season)
-        if not sea:
-            return None, "Invalid season"
-        existing = {e.number for e in sea.episodes}
+        existing = {e.number for e in (sea.episodes if sea else [])}
         mode = _field(fields, "mode", "range").strip().lower() or "range"
         issues: list[dict] = []
         if mode == "paste":
@@ -1469,7 +1484,7 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def _bulk_values(self, fields: dict) -> dict:
         return {
-            "season": _field(fields, "season"),
+            "season": (_field(fields, "new_season") if _field(fields, "season") == "__new__" else _field(fields, "season")),
             "mode": _field(fields, "mode", "range"),
             "ep_from": _field(fields, "ep_from"),
             "ep_to": _field(fields, "ep_to"),
@@ -1516,10 +1531,25 @@ class AdminHandler(BaseHTTPRequestHandler):
                        + f"#season-{season}")
 
     def _newseason_post(self, admin_id: int, fields: dict):
+        from urllib.parse import quote
+        from utils import parse_season_number
         did = int(fields.get("drama_id") or 0)
         total = int(fields["total"]) if (fields.get("total") or "").isdigit() else None
-        run_async(_CTX["svc"].new_season(did, total))
-        self._redirect(f"/admin/drama/{did}?ok=New+season+started")
+        silent = _flag(fields, "silent")
+        season = None
+        raw = (fields.get("season") or "").strip()
+        if raw:
+            try:
+                season = parse_season_number(raw)
+            except ValueError as e:
+                return self._redirect(f"/admin/drama/{did}?err=" + quote(str(e)))
+        try:
+            sea = run_async(_CTX["svc"].new_season(did, total, number=season, silent=silent))
+        except ValueError as e:
+            return self._redirect(f"/admin/drama/{did}?err=" + quote(str(e)))
+        note = " (silent)" if silent else ""
+        self._redirect(f"/admin/drama/{did}?ok=" + quote(f"Season {sea.number} started{note}")
+                       + f"#season-{sea.number}")
 
     def _complete_post(self, admin_id: int, fields: dict):
         did = int(fields.get("drama_id") or 0)

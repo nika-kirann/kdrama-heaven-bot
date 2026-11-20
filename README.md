@@ -43,7 +43,9 @@ An all-in-one Telegram bot for running the **kdrama_heaven** channel: drama card
 **Admins (in a DM with the bot):**
 - `/add`: guided wizard that asks for title, poster (photo or URL), synopsis, genres, year, status (buttons), total episodes, and links. `/skip` leaves a field empty and `/cancel` stops.
   - Links are grouped by **quality** (see "Episode link format" below).
-- `/addep <title|id>`: add episodes (numbering continues after the last episode; start with an `EP n` line to add or replace a quality on an existing episode). The channel post is edited in place and a "New episodes" notice is posted. You can also put the links on the lines after the command.
+- `/addep <title|id> [sN]`: add episodes (numbering continues after the last episode of that season; start with an `EP n` line to add or replace a quality on an existing episode). The channel post is edited in place and a "New episodes" notice is posted. You can also put the links on the lines after the command. The season must already exist (`/newseason` first).
+- `/newseason <title|id> [sN] [total_eps]`: start a new season. Without `sN` this is the next number after the highest that exists. With `sN` you can start Season 2 or 3 even if Season 1 was never added, or skip a season.
+- `/add [sN]`: new-drama wizard. `/add s2` starts the drama at Season 2, with no Season 1.
 - `/complete <title|id>`: switches the badge to COMPLETED ✅ and announces it.
 - `/edit <id> <field> <value>`: fields are title, synopsis, genres, year, poster, webposter, total, status, `repost`, `links` (links on the following lines, e.g. `EP 5` then `1080p: https://…`; this replaces only the qualities you give), or `quality <old> <new>` (rename, e.g. `/edit 3 quality 520p 720p`; use `-` as the new name to remove a quality).
 - `/delete <title|id>`: deletes the drama and its channel post.

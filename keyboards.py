@@ -46,6 +46,11 @@ def card_keyboard(drama, bot_username: str | None = None) -> M:
     if getattr(drama, "is_multi", False):
         n = len(drama.seasons)
         rows = [[B(f"▶️ Browse · {n} seasons", callback_data=f"sea:{drama.id}")]]
+    elif getattr(drama, "season_labeled", False):
+        sn = _sn(drama)
+        n = len(_eps(drama, sn))
+        rows = [[B(f"▶️ Browse · Season {sn}" + (f" · {n} EP" if n else ""),
+                   callback_data=f"eps:{drama.id}:{sn}:0")]]
     else:
         n = len(_eps(drama))
         rows = [[B(f"▶️ Browse & Download · {n} EP" if n else "▶️ Browse episodes",

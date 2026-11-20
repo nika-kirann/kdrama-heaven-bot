@@ -80,26 +80,77 @@ def silent_checkbox(*, checked: bool = False, name: str = "silent",
     )
 
 
+NEW_SEASON_VALUE = "__new__"
+
+
+def season_picker(d, *, el_id: str, default=None, allow_new: bool = True,
+                  counts: bool = False) -> str:
+    """Season <select> of existing seasons, optionally with 'Add a new season…'.
+    Always visible, including when the drama only has Season 2 (no Season 1)."""
+    cur = d.current
+    default_sn = str(default if default is not None else (cur.number if cur else 1))
+    known = {str(sea.number) for sea in d.seasons}
+    is_new = allow_new and default_sn not in known and default_sn.isdigit()
+    opts = []
+    for sea in d.seasons:
+        sel = " selected" if (not is_new and str(sea.number) == default_sn) else ""
+        cur_l = " (current)" if cur and sea.number == cur.number else ""
+        extra = ""
+        if counts:
+            n = len(sea.episodes)
+            extra = f" · {n} ep{'s' if n != 1 else ''}"
+        opts.append(f'<option value="{sea.number}"{sel}>Season {sea.number}{cur_l}{extra}</option>')
+    if allow_new:
+        opts.append(f'<option value="{NEW_SEASON_VALUE}"{" selected" if is_new or not known else ""}>'
+                    "Add a new season…</option>")
+    new_val = default_sn if is_new else ""
+    hidden = "" if (is_new or (allow_new and not known)) else " hidden"
+    new_html = (
+        f'<div class="season-new" id="{H.e(el_id)}-new-wrap"{hidden}>'
+        f'<label for="{H.e(el_id)}-new">New season number</label>'
+        f'<input name="new_season" id="{H.e(el_id)}-new" value="{H.e(new_val)}" '
+        f'inputmode="numeric" min="1" max="99" placeholder="e.g. 2"></div>'
+    ) if allow_new else ""
+    return (
+        f'<div class="season-picker"><label for="{H.e(el_id)}">Season</label>'
+        f'<select name="season" id="{H.e(el_id)}">{"".join(opts)}</select>'
+        f'{new_html}</div>'
+    )
+
+
+def parse_form_season(fields, field_get, d, *, allow_new: bool = False) -> tuple[int | None, str | None]:
+    """Read season / new_season fields. Returns (number, error)."""
+    from utils import parse_season_number
+    raw = field_get(fields, "season")
+    if raw == NEW_SEASON_VALUE:
+        raw = field_get(fields, "new_season")
+        if not raw.strip():
+            return None, "Enter a season number"
+        try:
+            n = parse_season_number(raw)
+        except ValueError as e:
+            return None, str(e)
+        if d.season(n) is None and not allow_new:
+            return None, "Invalid season"
+        return n, None
+    if raw.strip():
+        try:
+            n = parse_season_number(raw)
+        except ValueError as e:
+            return None, str(e)
+        if d.season(n) is None and not allow_new:
+            return None, "Invalid season"
+        return n, None
+    return (d.current.number if d.current else 1), None
+
+
 def add_episode_form(d, csrf: str, *, err: str = "") -> str:
     """Episode # + 480p/720p/1080p URL fields with Part / Mirror add buttons."""
     cur = d.current
     next_map = {str(sea.number): next_ep(sea) for sea in d.seasons}
     default_sn = cur.number if cur else 1
     default_ep = next_map.get(str(default_sn), 1)
-    if d.is_multi:
-        opts = []
-        for sea in d.seasons:
-            sel = " selected" if sea.number == default_sn else ""
-            cur_l = " (current)" if cur and sea.number == cur.number else ""
-            opts.append(f'<option value="{sea.number}"{sel}>Season {sea.number}{cur_l}</option>')
-        season_html = (
-            '<div><label>Season</label>'
-            f'<select name="season" id="addep-season">{"".join(opts)}</select></div>'
-        )
-    else:
-        season_html = (
-            f'<input type="hidden" name="season" id="addep-season" value="{default_sn}">'
-        )
+    season_html = season_picker(d, el_id="addep-season", default=default_sn, allow_new=True)
     err_html = (
         f'<div class="flash err inline" id="addep-err">{H.e(err)}</div>'
         if err else
@@ -427,19 +478,7 @@ def bulk_add_form(d, csrf: str, *, err: str = "", values: dict | None = None,
     cur = d.current
     default_sn = str(values.get("season") or (cur.number if cur else 1))
     existing_map = {str(sea.number): [e.number for e in sea.episodes] for sea in d.seasons}
-    if d.is_multi or len(d.seasons) > 1:
-        opts = []
-        for sea in d.seasons:
-            sel = " selected" if str(sea.number) == default_sn else ""
-            cur_l = " (current)" if cur and sea.number == cur.number else ""
-            n = len(sea.episodes)
-            opts.append(f'<option value="{sea.number}"{sel}>Season {sea.number}{cur_l} · {n} ep{"s" if n != 1 else ""}</option>')
-        season_html = (
-            '<div><label>Season</label>'
-            f'<select name="season" id="bulk-season">{"".join(opts)}</select></div>'
-        )
-    else:
-        season_html = f'<input type="hidden" name="season" id="bulk-season" value="{H.e(default_sn)}">'
+    season_html = season_picker(d, el_id="bulk-season", default=default_sn, allow_new=True, counts=True)
     mode = (values.get("mode") or "range").strip().lower()
     if mode not in {"range", "paste"}:
         mode = "range"
@@ -574,7 +613,7 @@ def edit_episode_form(d, ep, csrf: str, *, err: str = "", values: dict | None = 
         if err else
         '<div class="flash err inline" id="editep-err" hidden></div>'
     )
-    season_label = f"Season {sea_n}" if d.is_multi else "Season 1"
+    season_label = f"Season {sea_n}" if (d.is_multi or sea_n != 1) else "Season 1"
     return (
         f'<form method="post" action="/admin/drama/editep" id="editep-form">'
         f'{csrf}'
@@ -770,24 +809,8 @@ def bulk_edit_form(d, csrf: str, *, err: str = "", values: dict | None = None,
     values = values or {}
     cur = d.current
     default_sn = str(values.get("season") or (cur.number if cur else 1))
-    if d.is_multi or len(d.seasons) > 1:
-        opts = []
-        for sea in d.seasons:
-            sel = " selected" if str(sea.number) == default_sn else ""
-            cur_l = " (current)" if cur and sea.number == cur.number else ""
-            n = len(sea.episodes)
-            opts.append(
-                f'<option value="{sea.number}"{sel}>Season {sea.number}{cur_l} · '
-                f'{n} ep{"s" if n != 1 else ""}</option>'
-            )
-        season_html = (
-            '<div><label>Season</label>'
-            f'<select name="season" id="bulk-links-season">{"".join(opts)}</select></div>'
-        )
-    else:
-        season_html = (
-            f'<input type="hidden" name="season" id="bulk-links-season" value="{H.e(default_sn)}">'
-        )
+    season_html = season_picker(d, el_id="bulk-links-season", default=default_sn,
+                               allow_new=False, counts=True)
     mode = (values.get("mode") or "range").strip().lower()
     if mode not in {"range", "paste"}:
         mode = "range"

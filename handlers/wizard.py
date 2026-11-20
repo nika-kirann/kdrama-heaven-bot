@@ -25,9 +25,22 @@ LINK_HELP = (
 
 @admin_only
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from utils import parse_season_number
     context.user_data["draft"] = {}
-    await update.effective_message.reply_text("🎬 New drama! What's the <b>title</b>? (/cancel anytime)",
-                                              parse_mode="HTML")
+    raw = arg_text(update)
+    tip = ""
+    if raw:
+        try:
+            sn = parse_season_number(raw)
+        except ValueError:
+            sn = None
+        if sn:
+            context.user_data["draft"]["season"] = sn
+            tip = f", starting at Season {sn}"
+    await update.effective_message.reply_text(
+        f"🎬 New drama{tip}! What's the <b>title</b>? (/cancel anytime)"
+        + ("" if tip else "\n<i>Tip: /add s2 starts the drama at Season 2, with no Season 1.</i>"),
+        parse_mode="HTML")
     return TITLE
 
 
@@ -146,17 +159,22 @@ async def got_total(update, context):
         await update.message.reply_text("Send a number like 16, or /skip.")
         return TOTAL
     context.user_data["draft"]["total_episodes"] = int(t)
-    return await ask_links(update)
+    return await ask_links(update, context)
 
 
-async def ask_links(update):
-    await update.message.reply_text("🔗 <b>Episode links by quality</b>, starting at EP 1.\n" + LINK_HELP + "\n" + SKIP,
-                                    parse_mode="HTML")
+async def ask_links(update, context=None):
+    sn = 1
+    if context is not None:
+        sn = (context.user_data.get("draft") or {}).get("season") or 1
+    sea = f" for Season {sn}," if sn != 1 else ","
+    await update.message.reply_text(
+        f"🔗 <b>Episode links by quality</b>{sea} starting at EP 1.\n" + LINK_HELP + "\n" + SKIP,
+        parse_mode="HTML")
     return LINKS
 
 
 async def skip_total(update, context):
-    return await ask_links(update)
+    return await ask_links(update, context)
 
 
 async def got_links(update, context):
@@ -226,7 +244,7 @@ async def addep_start(update: Update, context):
         return await _do_addep(update, context, d.id, rest, season)
     sea = d.season(season) if season else d.current
     last = max((e.number for e in (sea.episodes if sea else [])), default=0)
-    label = f" S{sea.number}" if d.is_multi and sea else ""
+    label = f" S{sea.number}" if sea and (d.is_multi or sea.number > 1) else ""
     context.user_data["addep"] = {"id": d.id, "season": season or (sea.number if sea else 1)}
     await update.message.reply_text(
         f"Adding to <b>{h(d.title)}</b>{label} (has {len(sea.episodes) if sea else 0} eps, next is EP {last + 1}).\n"

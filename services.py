@@ -178,7 +178,7 @@ def next_block(d: Drama, tz=None, now=None) -> str:
     t = f" · {when:%I:%M %p}".replace(" 0", " ") + " IST" if has_time else ""
     rel = countdown_text(when, now or _dt.now(tz))
     cur = getattr(d, "current", None)
-    label = f"S{cur.number} Ep {ep}" if getattr(d, "is_multi", False) and cur else f"Ep {ep}"
+    label = f"S{cur.number} Ep {ep}" if getattr(d, "season_labeled", False) and cur else f"Ep {ep}"
     return (f"\n🟨 <b>NEXT EPISODE</b>\n┃ <b>{date}</b>{t}\n"
             f"┃ <i>{label} · {DAYS[when.weekday()]} · {rel}</i>")
 
@@ -194,7 +194,10 @@ def drama_card(d: Drama, limit: int = CAPTION_LIMIT, brand: str = "@kdrama_heave
     rows = [("Status", f"<code>{badge(d.status)}</code>")]
     if getattr(d, "is_multi", False):
         rows.append(("Seasons", f"<code>{len(d.seasons)}</code>"))
-        sn = cur.number if cur else 1
+        sn = cur.number if cur else d.first_season_number
+        rows.append(("Episodes", f"<code>S{sn} · {eps}{total}</code>"))
+    elif getattr(d, "season_labeled", False):
+        sn = cur.number if cur else d.first_season_number
         rows.append(("Episodes", f"<code>S{sn} · {eps}{total}</code>"))
     else:
         rows.append(("Episodes", f"<code>{eps}{total}</code>"))
@@ -332,22 +335,25 @@ class ChannelService:
             await self.refresh_card(drama_id)
             d = self.db.get_drama(drama_id)
             sn = season or (d.current.number if d.current else 1)
-            prefix = f"S{sn} " if d.is_multi else ""
+            prefix = f"S{sn} " if (d.is_multi or (sn and sn > 1)) else ""
             await self._send(f"🆕 <b>New episodes</b>: {h(d.title)} — {prefix}{h(describe_links(episodes))} added! 📺",
                              "service", drama_id)
             await self.notify_followers(drama_id, f"🆕 {prefix}{h(describe_links(episodes))} just landed!")
         _invalidate_site()
         return nums
 
-    async def new_season(self, drama_id: int, total_episodes: int | None = None):
-        sea = self.db.add_season(drama_id, total_episodes)
-        await self.refresh_card(drama_id)
-        d = self.db.get_drama(drama_id)
-        tot = f" ({sea.total_episodes} eps planned)" if sea.total_episodes else ""
-        await self._send(f"🆕 <b>{h(d.title)}</b> — Season {sea.number} is here!{tot}",
-                         "service", drama_id)
-        await self.notify_followers(
-            drama_id, f"🎬 <b>Season {sea.number} is here!</b> I'll ping you as new episodes drop.")
+    async def new_season(self, drama_id: int, total_episodes: int | None = None,
+                         number: int | None = None, *, silent: bool = False):
+        sea = self.db.add_season(drama_id, total_episodes, number=number)
+        if not silent:
+            await self.refresh_card(drama_id)
+            d = self.db.get_drama(drama_id)
+            tot = f" ({sea.total_episodes} eps planned)" if sea.total_episodes else ""
+            await self._send(f"🆕 <b>{h(d.title)}</b> — Season {sea.number} is here!{tot}",
+                             "service", drama_id)
+            await self.notify_followers(
+                drama_id, f"🎬 <b>Season {sea.number} is here!</b> I'll ping you as new episodes drop.")
+        _invalidate_site()
         return sea
 
     async def complete(self, drama_id: int, season: int | None = None):
@@ -414,7 +420,7 @@ class ChannelService:
             bits = []
             for sn, nums in by.items():
                 rng = f"EP {nums[0]}" if len(nums) == 1 else f"EP {nums[0]}–{nums[-1]}"
-                bits.append((f"S{sn} " if d.is_multi else "") + rng)
+                bits.append((f"S{sn} " if (d.is_multi or (sn and sn > 1)) else "") + rng)
             lines.append(f"• <b>{h(d.title)}</b> — {', '.join(bits)} {'✅' if d.status == 'Completed' else '🔄'}")
         return await self._send("\n".join(lines), "digest")
 
@@ -460,7 +466,7 @@ class ChannelService:
             return out
         cur, eps_list, tot = _current_eps(d)
         prog = f"{len(eps_list)}{'/' + str(tot) if tot else ''}"
-        if d.is_multi and cur:
+        if (d.is_multi or getattr(d, "season_labeled", False)) and cur:
             prog = f"S{cur.number} · {prog}"
         text = (f"🔔 <b>New for you</b> ✦\n\n✦ <b>{h(d.title)}</b> ✦\n{headline}\n\n"
                 f"<i>{prog} episodes · "

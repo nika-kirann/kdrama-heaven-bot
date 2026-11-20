@@ -660,3 +660,27 @@ def test_google_site_verification_env(web, monkeypatch):
     assert "google-site-verification" not in raw(web, "/")[2]
     web.cfg.google_site_verification = ""
     assert "google-site-verification" not in raw(web, "/")[2]
+
+
+def test_season_2_only_has_no_empty_season_1(web):
+    d = web.db.add_drama(title="Late Season", status="Ongoing", year=2026,
+                         season=2, total_episodes=8,
+                         episodes={1: [("720p", "https://x/s2e1", "part")],
+                                   2: [("1080p", "https://x/s2e2", "part")]},
+                         synopsis="Season 2 is where we start.")
+    P.invalidate()
+    body = raw(web, f"/drama/{d.id}")[2]
+    assert "Season 1" not in body
+    assert "Season 2" in body and 'class="seasons"' in body
+    assert 'id="ep-2-1"' in body and "Season 2 · Episode 1" in body
+    assert 'id="ep-1-1"' not in body
+    # default (no ?s=) lands on the existing season, not a missing Season 1
+    assert 'id="ep-2-2"' in body or 'id="ep-2-1"' in body
+    # requesting the missing season still shows Season 2
+    body_s1 = raw(web, f"/drama/{d.id}?s=1")[2]
+    assert "Season 1" not in body_s1 and 'id="ep-2-1"' in body_s1
+    # sitemap and search still include the drama
+    sm = raw(web, "/sitemap.xml")[2]
+    assert f"/drama/{d.id}" in sm
+    hits = raw(web, "/api/search?q=Late")[2]
+    assert "Late Season" in hits

@@ -81,9 +81,10 @@ def web(tmp_path):
             else:
                 bot.sent.append({"silent_import": drama_id})
             return nums
-        async def new_season(self, drama_id, total_episodes=None):
-            sea = db.add_season(drama_id, total_episodes)
-            await self.refresh_card(drama_id)
+        async def new_season(self, drama_id, total_episodes=None, number=None, *, silent=False):
+            sea = db.add_season(drama_id, total_episodes, number=number)
+            if not silent:
+                await self.refresh_card(drama_id)
             return sea
         async def complete(self, drama_id, season=None):
             db.complete_season(drama_id, season)
@@ -439,3 +440,49 @@ def test_website_poster_field_add_edit_clear_and_thumb(web):
     web.open("/admin/add", {"csrf": web.csrf_from(body), "title": "Bad WP", "status": "Ongoing",
                             "web_poster_url": "ftp://x/y.jpg"}, multipart=True)
     assert web.db.find_drama("Bad WP") is None
+
+
+def test_add_drama_season_2_add_season_and_bulk(web):
+    web.login_password()
+    _, body, _ = web.open("/admin/add")
+    assert 'name="season"' in body and 'id="add-season"' in body
+    assert "Season 1 episodes" in body
+    csrf = web.csrf_from(body)
+    web.open("/admin/add", {
+        "csrf": csrf, "title": "S2 Only", "status": "Ongoing", "season": "2", "total": "16",
+        "ep_from": "1", "ep_to": "2", "720p": "https://s2/{ep}", "silent": "1",
+    })
+    d = web.db.find_drama("S2 Only")
+    assert d and d.season(1) is None and d.current.number == 2
+    assert [e.number for e in d.season(2).episodes] == [1, 2]
+    # no channel post because silent
+    assert not any(x.get("post_card") == d.id for x in web.bot.sent)
+    _, body, _ = web.open(f"/admin/drama/{d.id}")
+    assert "Season 2" in body and 'id="season-2"' in body and 'id="season-1"' not in body
+    assert "Add season" in body and 'name="season"' in body
+    csrf = web.csrf_from(body)
+    web.open("/admin/drama/newseason", {
+        "csrf": csrf, "drama_id": str(d.id), "season": "3", "total": "10", "silent": "1",
+    })
+    d = web.db.get_drama(d.id)
+    assert d.season(3) and d.season(3).total_episodes == 10 and d.season(1) is None
+    # Add episode into the new season via the picker
+    _, body, _ = web.open(f"/admin/drama/{d.id}")
+    csrf = web.csrf_from(body)
+    web.open("/admin/drama/addep", {
+        "csrf": csrf, "drama_id": str(d.id), "season": "3", "episode": "1",
+        "1080p": "https://s3/1", "silent": "1",
+    })
+    assert [e.number for e in web.db.get_drama(d.id).season(3).episodes] == [1]
+    # Bulk add can create Season 4
+    _, body, _ = web.open(f"/admin/drama/{d.id}/bulk")
+    assert "Add a new season" in body
+    csrf = web.csrf_from(body)
+    st, body, hdrs = web.open("/admin/drama/bulk", {
+        "csrf": csrf, "drama_id": str(d.id), "season": "__new__", "new_season": "4",
+        "mode": "range", "ep_from": "1", "ep_to": "3", "720p": "https://s4/{ep}",
+        "on_existing": "skip", "silent": "1", "action": "import",
+    })
+    d = web.db.get_drama(d.id)
+    assert d.season(4) and [e.number for e in d.season(4).episodes] == [1, 2, 3]
+    assert d.season(1) is None

@@ -202,3 +202,64 @@ async def test_nextep_cleared_on_newseason(env):
     await env.send(msg_update(f"/newseason {d.id}", ADMIN))
     d = env.db.get_drama(d.id)
     assert d.next_ep_date is None and d.air_time is None
+
+
+# ---------- later-first seasons (no Season 1 required) ----------
+def test_add_drama_can_start_at_season_2_and_reload_keeps_it(tmp_path):
+    p = tmp_path / "s2.db"
+    db = Database(f"sqlite:///{p}")
+    d = db.add_drama(title="Only S2", status="Ongoing", season=2, total_episodes=16,
+                     episodes={1: [("720p", "https://x/1", "part")],
+                               2: [("720p", "https://x/2", "part")]})
+    assert d.season(1) is None and d.current.number == 2
+    assert [e.number for e in d.season(2).episodes] == [1, 2]
+    assert d.season_labeled and not d.is_multi
+    card = drama_card(d)
+    assert "S2 · 2/16" in card and "Seasons" not in card
+    db2 = Database(f"sqlite:///{p}")
+    d2 = db2.get_drama(d.id)
+    assert d2.season(1) is None and d2.current.number == 2
+    assert [e.number for e in d2.season(2).episodes] == [1, 2]
+
+
+def test_add_season_can_skip_and_add_episodes_create_it():
+    from utils import parse_season_number
+    assert parse_season_number("s3") == 3
+    assert parse_season_number("2") == 2
+    assert parse_season_number("", default=1) == 1
+    with pytest.raises(ValueError):
+        parse_season_number("0")
+    db = Database("sqlite:///:memory:")
+    d = db.add_drama(title="Skip", status="Ongoing", season=1,
+                     episodes={1: [("720p", "https://x/1", "part")]})
+    sea = db.add_season(d.id, 10, number=3)
+    assert sea.number == 3
+    d = db.get_drama(d.id)
+    assert d.season(2) is None and d.season(3) and d.is_multi
+    with pytest.raises(ValueError):
+        db.add_season(d.id, number=3)
+    nums = db.add_episodes(d.id, {1: [("1080p", "https://y/1", "part")]}, season=4)
+    assert nums == [1]
+    d = db.get_drama(d.id)
+    assert d.season(4) and [e.number for e in d.season(4).episodes] == [1]
+
+
+async def test_newseason_explicit_and_add_s2(env):
+    d, _ = await _drama_on_channel(env, 1)
+    await env.send(msg_update(f"/newseason {d.id} s3 12", ADMIN))
+    d = env.db.get_drama(d.id)
+    assert d.season(3) and d.season(3).total_episodes == 12 and d.season(2) is None
+    assert "Season 3 started" in last_text(env)
+    await env.send(msg_update(f"/newseason {d.id} s3", ADMIN))
+    assert "already has Season 3" in last_text(env)
+    # /add s2 creates a drama with only Season 2
+    await env.send(msg_update("/add s2", ADMIN))
+    assert "Season 2" in last_text(env)
+    for step in ["Later First", "/skip", "/skip", "/skip", "/skip", "/skip"]:
+        await env.send(msg_update(step, ADMIN))
+    await env.send(cb_update("st:Ongoing", ADMIN))
+    await env.send(msg_update("/skip", ADMIN))
+    await env.send(msg_update("720p: https://z/{ep} 1 2", ADMIN))
+    d2 = env.db.find_drama("Later First")
+    assert d2 and d2.season(1) is None and d2.current.number == 2
+    assert [e.number for e in d2.season(2).episodes] == [1, 2]

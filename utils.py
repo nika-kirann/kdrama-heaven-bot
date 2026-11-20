@@ -85,6 +85,23 @@ def parse_hhmm(s: str) -> tuple[int, int]:
     return int(hh), int(mm)
 
 
+def parse_season_number(value, default: int | None = None) -> int | None:
+    """Parse a season number from '2', 's2', or empty (returns default).
+    Raises ValueError if the value is present but not a number in 1–99."""
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    if raw.lower().startswith("s") and raw[1:].isdigit():
+        n = int(raw[1:])
+    elif raw.isdigit():
+        n = int(raw)
+    else:
+        raise ValueError("Season must be a number like 2 or s2")
+    if not 1 <= n <= 99:
+        raise ValueError("Season must be 1–99")
+    return n
+
+
 DEFAULT_QUALITIES = ("480p", "720p", "1080p")
 LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 +._-]{0,11}$")
 INLINE_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9 +._-]{0,11}?)\s*[:=]\s*(.*)$")

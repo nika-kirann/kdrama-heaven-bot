@@ -212,7 +212,7 @@ async def on_quality(update: Update, context):
     season, epn, page, qidx = _parse_ep_ql(parts)
     if parts[0] == "ep":
         markup = kb.quality_keyboard(d, epn, page, season=season)
-        msg = f"{'S' + str(season) + ' ' if season and d.is_multi else ''}EP {epn}: pick a quality"
+        msg = f"{'S' + str(season) + ' ' if season and (d.is_multi or getattr(d, 'season_labeled', False) or season > 1) else ''}EP {epn}: pick a quality"
     else:
         markup = kb.links_keyboard(d, epn, qidx, page, season=season)
         if markup:

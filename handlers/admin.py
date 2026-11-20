@@ -54,20 +54,43 @@ async def complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ {d.title} Season {target} completed; drama still ongoing.")
 
 
+def _parse_newseason(raw: str, find_drama):
+    """'<drama> [sN] [total]' -> (ref, season_or_None, total_or_None)."""
+    parts = (raw or "").split()
+    season = total = None
+    used = 0
+    if parts and parts[-1].isdigit():
+        total = int(parts[-1])
+        used += 1
+    if len(parts) > used:
+        bit = parts[-1 - used]
+        if bit.lower().startswith("s") and bit[1:].isdigit():
+            season = int(bit[1:])
+            used += 1
+    ref = " ".join(parts[:len(parts) - used]) if used else (raw or "").strip()
+    if not find_drama(ref) and total is not None:
+        ref2 = (ref + " " + str(total)).strip()
+        if find_drama(ref2):
+            ref, total = ref2, None
+    return ref, season, total
+
+
 @admin_only
 async def newseason(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db, svc, _ = deps(context)
     raw = arg_text(update)
-    parts = raw.rsplit(maxsplit=1)
-    total = None
-    if len(parts) == 2 and parts[1].isdigit() and db.find_drama(parts[0]):
-        ref, total = parts[0], int(parts[1])
-    else:
-        ref = raw
+    ref, season, total = _parse_newseason(raw, db.find_drama)
     d = db.find_drama(ref)
     if not d:
-        return await update.message.reply_text("Usage: /newseason <drama id or title> [total_eps]")
-    sea = await svc.new_season(d.id, total)
+        return await update.message.reply_text("Usage: /newseason <drama id or title> [sN] [total_eps]")
+    if season is not None and not (1 <= season <= 99):
+        return await update.message.reply_text("Season must be 1–99.")
+    if season is not None and d.season(season):
+        return await update.message.reply_text(f"{d.title} already has Season {season}.")
+    try:
+        sea = await svc.new_season(d.id, total, number=season)
+    except ValueError as e:
+        return await update.message.reply_text(f"⚠️ {e}")
     await update.message.reply_text(
         f"🆕 {d.title} Season {sea.number} started"
         + (f" ({sea.total_episodes} eps planned)" if sea.total_episodes else "")

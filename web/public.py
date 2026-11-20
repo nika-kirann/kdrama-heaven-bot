@@ -152,10 +152,11 @@ def _build(ctx) -> dict:
         seas = d["seasons"]
         multi = len(seas) > 1
         latest_at, latest_label = None, ""
+        labeled = multi or any(x["n"] != 1 for x in seas)
         if d["latest"]:
             at, sn, ep = d["latest"]
             latest_at = _to_naive(at)
-            latest_label = f"S{sn} · EP {ep}" if multi else f"EP {ep}"
+            latest_label = f"S{sn} · EP {ep}" if labeled else f"EP {ep}"
         cur = (max([x for x in seas if x["status"] == "Ongoing"] or seas, key=lambda x: x["n"]) if seas else None)
         have = cur["eps"] if cur else d["episodes"]
         tot = (cur["total"] if cur else None) or d["total_episodes"]
@@ -188,7 +189,8 @@ def _build(ctx) -> dict:
             "audio": d["audio"] or getattr(cfg, "default_audio", ""),
             "poster": poster, "web_poster": web_poster,
             "poster_ref": ref if (posters_on and not web_poster) else None,
-            "multi": multi, "cur": cur["n"] if cur else 1,
+            "multi": multi, "labeled": labeled,
+            "cur": cur["n"] if cur else (min((x["n"] for x in seas), default=1)),
             "have": have, "total": tot, "next": nxt,
             "latest_at": latest_at, "latest_label": latest_label,
             "updated": _to_naive(d["updated_at"]), "n": norm(d["title"]), "alt": [],
@@ -772,7 +774,8 @@ def ep_panel(d, sea, ep, bot: str, open_: bool) -> str:
             btns[0] = btns[0].replace('class="qbtn mir"', 'class="qbtn main"')
         tone = {"480p": "q480", "720p": "q720", "1080p": "q1080"}.get(g["q"], "qhd")
         rows.append(f'<div class="qrow {tone}"><span class="qtag">{e(g["q"])}</span><div class="qbtns">{"".join(btns)}</div></div>')
-    label = f"Season {sea['n']} · Episode {ep['n']}" if d["multi"] else f"Episode {ep['n']}"
+    label = (f"Season {sea['n']} · Episode {ep['n']}"
+             if (d["multi"] or d.get("labeled") or sea["n"] != 1) else f"Episode {ep['n']}")
     body = "".join(rows) or '<p class="muted">Links for this episode are coming soon.</p>'
     return (f'<div class="ep-panel" id="ep-{sea["n"]}-{ep["n"]}" data-ep="{ep["n"]}"{"" if open_ else " hidden"}>'
             f'<div class="ep-panel-h"><h3>{e(label)}</h3><span class="muted">Choose a quality</span></div>'
@@ -787,12 +790,15 @@ def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None,
         return None
     bot = bot_name(ctx)
     seas = d["seasons"]
-    sea = next((s for s in seas if s["n"] == season), None) or next((s for s in seas if s["n"] == d["cur"]), None) \
-        or (seas[-1] if seas else {"n": 1, "status": d["status"], "total": d["total"], "eps": []})
+    lowest = min((s["n"] for s in seas), default=1) if seas else 1
+    sea = next((s for s in seas if s["n"] == season), None) \
+        or next((s for s in seas if s["n"] == d["cur"]), None) \
+        or next((s for s in seas if s["n"] == lowest), None) \
+        or (seas[0] if seas else {"n": lowest, "status": d["status"], "total": d["total"], "eps": []})
     eps = sea["eps"]
     sel = next((x for x in eps if x["n"] == epn), None) or (eps[-1] if eps else None)
     switch = ""
-    if d["multi"]:
+    if d["multi"] or d.get("labeled"):
         switch = '<div class="seasons" role="tablist">' + "".join(
             f'<a class="tab{" on" if s["n"] == sea["n"] else ""}" href="{drama_url(d)}?s={s["n"]}#episodes">'
             f'Season {s["n"]}<span>{len(s["eps"])}{"/" + str(s["total"]) if s["total"] else ""}</span></a>'
@@ -805,14 +811,16 @@ def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None,
                          for n in range(max((x["n"] for x in eps), default=0) + 1, sea["total"] + 1))
     panels = "".join(ep_panel(d, sea, x, bot, bool(sel and x["n"] == sel["n"])) for x in eps)
     eps_html = (f'<div class="ep-grid" id="ep-grid">{chips}</div>{panels}' if eps else
-                empty("No episodes yet", "Follow the drama on Telegram and we'll DM you when episode 1 drops.",
+                empty("No episodes yet", "Follow the drama on Telegram and we'll DM you when new episodes drop.",
                       f'<a class="btn pri" href="{tme(bot, "follow_" + str(d["id"]))}" target="_blank" rel="noopener">{ic("bell")}Notify me</a>'))
     facts = [("Status", status_pill(d["status"]))]
     if d["year"]:
         facts.append(("Year", e(d["year"])))
-    facts.append(("Episodes", e(progress(d) + (f" · S{d['cur']}" if d["multi"] else ""))))
+    facts.append(("Episodes", e(progress(d) + (f" · S{d['cur']}" if (d["multi"] or d.get("labeled")) else ""))))
     if d["multi"]:
         facts.append(("Seasons", e(len(seas))))
+    elif d.get("labeled"):
+        facts.append(("Season", e(sea["n"])))
     if d["imdb"]:
         facts.append(("IMDb", f'{ic("star", "gold")}{e(d["imdb"])}'))
     if d["audio"]:

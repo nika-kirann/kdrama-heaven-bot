@@ -136,16 +136,36 @@ function wireQualityButtons(root) {
     errEl.hidden = !msg;
     errEl.textContent = msg || '';
   }
+  const newWrap = document.getElementById('addep-season-new-wrap');
+  const newEl = document.getElementById('addep-season-new');
+  function seasonValue() {
+    if (!seasonEl) return '1';
+    if (seasonEl.value === '__new__') return (newEl && newEl.value.trim()) || '';
+    return seasonEl.value || '1';
+  }
+  function syncNewWrap() {
+    if (!newWrap) return;
+    const on = seasonEl && seasonEl.value === '__new__';
+    newWrap.hidden = !on;
+    if (on && newEl && !newEl.value) newEl.focus();
+  }
   function syncEp() {
     if (!epEl || !seasonEl) return;
-    const sn = seasonEl.value || '1';
-    if (nextMap[sn] != null) epEl.value = nextMap[sn];
+    const sn = seasonValue() || '1';
+    epEl.value = nextMap[sn] != null ? nextMap[sn] : 1;
   }
   if (seasonEl && seasonEl.tagName === 'SELECT') {
-    seasonEl.addEventListener('change', syncEp);
+    seasonEl.addEventListener('change', () => { syncNewWrap(); syncEp(); });
+    syncNewWrap();
   }
   form.addEventListener('submit', (ev) => {
     showErr('');
+    if (seasonEl && seasonEl.value === '__new__') {
+      const n = (newEl && newEl.value || '').trim();
+      if (!/^\d+$/.test(n) || +n < 1 || +n > 99) {
+        ev.preventDefault(); showErr('Enter a season number (1–99)'); newEl && newEl.focus(); return;
+      }
+    }
     const ep = (epEl && epEl.value || '').trim();
     if (!/^\d+$/.test(ep) || +ep < 1 || +ep > 9999) {
       ev.preventDefault(); showErr('Episode number required (1–9999)'); epEl && epEl.focus(); return;
@@ -165,9 +185,21 @@ function wireQualityButtons(root) {
   if (!form) return;
   wireQualityButtons(form);
   const totalEl = document.getElementById('add-total');
+  const seasonEl = document.getElementById('add-season');
+  const seasonHead = document.getElementById('add-season-heading');
   const fromEl = document.getElementById('ep-from');
   const toEl = document.getElementById('ep-to');
   const errEl = document.getElementById('add-links-err');
+  function syncSeasonHead() {
+    if (!seasonHead) return;
+    const n = Math.max(1, parseInt((seasonEl && seasonEl.value) || '1', 10) || 1);
+    seasonHead.innerHTML = 'Season ' + n + ' episodes <span class="muted">(optional)</span>';
+  }
+  if (seasonEl) {
+    seasonEl.addEventListener('input', syncSeasonHead);
+    seasonEl.addEventListener('change', syncSeasonHead);
+    syncSeasonHead();
+  }
   function showErr(msg) {
     if (!errEl) return;
     errEl.hidden = !msg;
@@ -208,6 +240,10 @@ function wireQualityButtons(root) {
   updatePreview();
   form.addEventListener('submit', (ev) => {
     showErr('');
+    const sea = (seasonEl && seasonEl.value || '1').trim() || '1';
+    if (!/^\d+$/.test(sea) || +sea < 1 || +sea > 99) {
+      ev.preventDefault(); showErr('Season must be a number from 1 to 99'); seasonEl && seasonEl.focus(); return;
+    }
     const urls = [...form.querySelectorAll('#add-links .q-block input')]
       .map(i => i.value.trim()).filter(Boolean);
     if (!urls.length) return; // drama with 0 episodes is fine
@@ -518,6 +554,17 @@ function wireQualityButtons(root) {
   const errEl = document.getElementById('bulk-err');
   const existingMap = JSON.parse(form.getAttribute('data-existing') || '{}');
   const QUALITIES = ['480p', '720p', '1080p'];
+  const seasonEl = document.getElementById('bulk-season');
+  const newWrap = document.getElementById('bulk-season-new-wrap');
+  const newEl = document.getElementById('bulk-season-new');
+  function syncNewWrap() {
+    if (!newWrap) return;
+    const on = seasonEl && seasonEl.value === '__new__';
+    newWrap.hidden = !on;
+  }
+  if (seasonEl) seasonEl.addEventListener('change', () => { syncNewWrap(); updateLive(); });
+  if (newEl) newEl.addEventListener('input', updateLive);
+  syncNewWrap();
 
   function showErr(msg) {
     if (!errEl) return;
@@ -538,8 +585,13 @@ function wireQualityButtons(root) {
     btn.addEventListener('click', () => setMode(btn.getAttribute('data-bulk-tab')));
   });
 
+  function seasonValue() {
+    if (!seasonEl) return '1';
+    if (seasonEl.value === '__new__') return (newEl && newEl.value.trim()) || '';
+    return seasonEl.value || '1';
+  }
   function existingNums() {
-    const sn = (document.getElementById('bulk-season') || {}).value || '1';
+    const sn = seasonValue() || '1';
     return new Set((existingMap[sn] || []).map(Number));
   }
 
@@ -762,6 +814,12 @@ function wireQualityButtons(root) {
 
   form.addEventListener('submit', (ev) => {
     showErr('');
+    if (seasonEl && seasonEl.value === '__new__') {
+      const n = (newEl && newEl.value || '').trim();
+      if (!/^\d+$/.test(n) || +n < 1 || +n > 99) {
+        ev.preventDefault(); showErr('Enter a season number (1–99)'); newEl && newEl.focus(); return;
+      }
+    }
     const parsed = currentParse();
     if (parsed.empty) {
       ev.preventDefault();
