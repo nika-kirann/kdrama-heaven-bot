@@ -842,14 +842,12 @@ def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None,
             f'<a class="tab{" on" if s["n"] == sea["n"] else ""}" href="{drama_url(d)}?s={s["n"]}#episodes">'
             f'Season {s["n"]}<span>{len(s["eps"])}{"/" + str(s["total"]) if s["total"] else ""}</span></a>'
             for s in seas) + "</div>"
-    latest_sea = max((s for s in seas if s.get("eps")), key=lambda s: (s["n"], s["eps"][-1]["n"]), default=None)
-    latest_ep = latest_sea["eps"][-1] if latest_sea else None
-    if latest_ep:
-        watch_href = f'{drama_url(d)}?s={latest_sea["n"]}&amp;ep={latest_ep["n"]}#episodes'
-        jump = f' data-jump="ep-{latest_sea["n"]}-{latest_ep["n"]}"' if latest_sea["n"] == sea["n"] else ""
-        watch_btn = f'<a class="btn pri xl"{jump} href="{watch_href}">{ic("play")}Watch latest episode</a>'
+    first = eps[0] if eps else None
+    if first and first["n"] == 1:
+        watch_btn = (f'<a class="btn pri" href="#episodes" data-jump="ep-{sea["n"]}-{first["n"]}">'
+                     f'{ic("play")}Start EP 1</a>')
     else:
-        watch_btn = f'<a class="btn pri xl" href="#episodes">{ic("play")}Episodes</a>'
+        watch_btn = f'<a class="btn pri" href="#episodes">{ic("play")}Episodes</a>'
     chips = "".join(
         f'<a class="epc{" on" if sel and x["n"] == sel["n"] else ""}" href="{drama_url(d)}?s={sea["n"]}&amp;ep={x["n"]}#episodes" '
         f'data-ep="{x["n"]}" data-target="ep-{sea["n"]}-{x["n"]}">{x["n"]}</a>' for x in eps)

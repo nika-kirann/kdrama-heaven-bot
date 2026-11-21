@@ -707,17 +707,17 @@ def test_ui_refresh_hero_cards_theme_and_drama_header(web):
     assert "IntersectionObserver" in js and "touchstart" in js
     css = raw(web, f"/static/public.css?v={P.ASSET_V}")[2]
     assert "data-theme" in css and "skel-card" in css and "ep-badge" in css
-    # drama header: blurred backdrop, watch-latest, no NAME (YEAR)
+    # drama header: blurred backdrop, Start EP 1 (original CTA), no NAME (YEAR)
     body = raw(web, f"/drama/{b.id}")[2]
     assert 'class="dhero"' in body and 'class="dbg' in body
-    assert "Watch latest episode" in body
+    assert "Start EP 1" in body and "Watch latest episode" not in body
     assert "<h1>Squid Game</h1>" in body and "Squid Game (2021)" not in body
     assert f"?s=1&amp;ep=1#episodes" in body
     # single-season title still has no season switcher
     assert 'class="seasons"' not in raw(web, f"/drama/{a.id}")[2]
 
 
-def test_watch_latest_and_season_tabs_live_in_header(web):
+def test_season_tabs_live_in_header_with_original_cta(web):
     d = web.db.add_drama(title="Storage Show", status="Ongoing",
                          episodes={1: [("720p", "https://x/s1e1", "part")],
                                    2: [("720p", "https://x/s1e2", "part")]})
@@ -727,12 +727,17 @@ def test_watch_latest_and_season_tabs_live_in_header(web):
     body = raw(web, f"/drama/{d.id}")[2]
     header = body.split('class="dhero"')[1].split('class="dbody"')[0]
     assert 'class="seasons"' in header and "Season 2" in header and "Season 1" in header
-    assert "Watch latest episode" in header
-    # latest episode is Season 2 EP 1
-    assert f'/drama/{d.id}-storage-show?s=2&amp;ep=1#episodes' in header
+    assert "Watch latest episode" not in body
+    assert "Start EP 1" in header and 'data-jump="' in header and 'href="#episodes"' in header
     # episodes section no longer repeats the season tabs
     eps = body.split('id="episodes"')[1]
     assert 'class="seasons"' not in eps
+    # a season that does not start at EP 1 gets the Episodes jump, not Start EP 1
+    d2 = web.db.add_drama(title="Mid Start", status="Ongoing", season=2, total_episodes=8,
+                          episodes={5: [("720p", "https://x/s2e5", "part")]})
+    P.invalidate()
+    mid = raw(web, f"/drama/{d2.id}")[2]
+    assert "Start EP 1" not in mid and ">Episodes</a>" in mid and "Watch latest episode" not in mid
 
 
 def test_resolve_status_and_featured_dramas():
