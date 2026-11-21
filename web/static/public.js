@@ -3,6 +3,40 @@
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const reduceMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // theme (dark is the default; choice lives in localStorage)
+  const THEME_KEY = 'kdh-theme';
+  const themeBtn = $('#theme-toggle'), themeMeta = $('#theme-color');
+  const applyTheme = (t) => {
+    if (t === 'light') {
+      document.documentElement.setAttribute('data-theme', 'light');
+      themeMeta && themeMeta.setAttribute('content', '#f3f0fa');
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+      themeMeta && themeMeta.setAttribute('content', '#0b0918');
+    }
+    if (themeBtn) {
+      const light = t === 'light';
+      themeBtn.setAttribute('aria-label', light ? 'Switch to dark theme' : 'Switch to light theme');
+      themeBtn.setAttribute('aria-pressed', light ? 'true' : 'false');
+    }
+  };
+  try { applyTheme(localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'); } catch (e) { applyTheme('dark'); }
+  if (themeBtn) {
+    themeBtn.addEventListener('click', () => {
+      const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* private mode */ }
+      applyTheme(next);
+    });
+  }
+
+  // posters: fade in once the file has loaded (cached images included)
+  $$('.pst img, .bgimg').forEach(img => {
+    const on = () => img.classList.add('is-on');
+    if (img.complete && img.naturalWidth) on();
+    else img.addEventListener('load', on, { once: true });
+  });
 
   // header search toggle
   const panel = $('#hdr-search'), openB = $('#search-open'), closeB = $('#search-close');
@@ -15,7 +49,7 @@
     });
   }
 
-  // live suggestions
+  // live suggestions — debounced /api/search, keyboard nav; Enter (no highlight) goes to /search
   $$('input[data-suggest]').forEach(inp => {
     const form = inp.closest('form'), box = $('.suggest', form);
     let timer, ctl, idx = -1, items = [];
@@ -24,13 +58,19 @@
       return i < 0 || !q ? esc(t) : esc(t.slice(0, i)) + '<mark>' + esc(t.slice(i, i + q.length)) + '</mark>' + esc(t.slice(i + q.length));
     };
     const close = () => { box.hidden = true; idx = -1; };
+    const skel = () => {
+      box.innerHTML = Array.from({ length: 3 }, () =>
+        '<div class="sug skel" aria-hidden="true"><div class="pst skel-box"></div><div class="skel-lines"><i></i><i></i></div></div>'
+      ).join('');
+      box.hidden = false; idx = -1;
+    };
     const render = (q, res) => {
       items = res;
       if (!res.length) { box.innerHTML = '<div class="sug-empty">No matches for “' + esc(q) + '”</div>'; box.hidden = false; return; }
       box.innerHTML = res.map((r, i) =>
         '<a class="sug" role="option" href="' + esc(r.url) + '" data-i="' + i + '">' +
           '<div class="pst" style="--h:' + (+r.h || 270) + '"><span class="pst-ph">' + esc(r.i || (r.title || '?')[0].toUpperCase()) + '</span>' +
-          (r.poster ? '<img src="' + esc(r.poster) + '" alt="' + esc(r.title) + ' poster" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '') + '</div>' +
+          (r.poster ? '<img src="' + esc(r.poster) + '" alt="' + esc(r.title) + ' poster" loading="lazy" referrerpolicy="no-referrer" onload="this.classList.add(\'is-on\')" onerror="this.remove()">' : '') + '</div>' +
           '<div><b>' + hl(r.title, q) + '</b><small>' + esc([r.year, r.eps].filter(Boolean).join(' · ')) + '</small></div>' +
           '<span class="spill ' + (r.status === 'Completed' ? 'done' : 'live') + '"><i></i>' + esc(r.status) + '</span></a>'
       ).join('') + '<a class="sug-all" href="/search?q=' + encodeURIComponent(q) + '">See all results for “' + esc(q) + '”</a>';
@@ -40,6 +80,7 @@
       clearTimeout(timer);
       const q = inp.value.trim();
       if (q.length < 2) { close(); return; }
+      skel();
       timer = setTimeout(async () => {
         try {
           ctl && ctl.abort(); ctl = new AbortController();
@@ -51,7 +92,12 @@
       }, 180);
     });
     inp.addEventListener('keydown', (e) => {
-      const opts = $$('.sug', box);
+      const opts = $$('.sug:not(.skel)', box);
+      if (e.key === 'Enter' && (box.hidden || idx < 0)) {
+        // no highlighted suggestion: let the form go to /search
+        close();
+        return;
+      }
       if (box.hidden || !opts.length) return;
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
@@ -65,19 +111,38 @@
     document.addEventListener('click', (e) => { if (!form.contains(e.target)) close(); });
   });
 
-  // hero carousel
+  // hero carousel: auto-advance, pause on hover, swipe, respect reduced motion
   const hero = $('#hero');
   if (hero) {
     const slides = $$('.slide', hero), dots = $$('.dot', hero);
-    let cur = 0, t;
+    let cur = 0, t, startX = 0, startY = 0, swiping = false;
     const go = (n) => {
+      if (!slides.length) return;
       slides[cur].classList.remove('on'); dots[cur] && dots[cur].classList.remove('on');
       cur = (n + slides.length) % slides.length;
       slides[cur].classList.add('on'); dots[cur] && dots[cur].classList.add('on');
     };
-    const auto = () => { clearInterval(t); if (slides.length > 1) t = setInterval(() => go(cur + 1), 7000); };
+    const auto = () => {
+      clearInterval(t);
+      if (!reduceMotion() && slides.length > 1 && !document.hidden) t = setInterval(() => go(cur + 1), 7000);
+    };
     dots.forEach(d => d.addEventListener('click', () => { go(+d.dataset.go); auto(); }));
-    hero.addEventListener('mouseenter', () => clearInterval(t)); hero.addEventListener('mouseleave', auto);
+    hero.addEventListener('mouseenter', () => clearInterval(t));
+    hero.addEventListener('mouseleave', auto);
+    document.addEventListener('visibilitychange', auto);
+    hero.addEventListener('touchstart', (e) => {
+      if (e.changedTouches.length !== 1) return;
+      startX = e.changedTouches[0].clientX;
+      startY = e.changedTouches[0].clientY;
+      swiping = true;
+    }, { passive: true });
+    hero.addEventListener('touchend', (e) => {
+      if (!swiping) return;
+      swiping = false;
+      const dx = e.changedTouches[0].clientX - startX;
+      const dy = e.changedTouches[0].clientY - startY;
+      if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) { go(cur + (dx < 0 ? 1 : -1)); auto(); }
+    }, { passive: true });
     auto();
   }
 
@@ -90,15 +155,16 @@
       $$('.ep-panel').forEach(p => { p.hidden = p.id !== chip.dataset.target; });
       const url = new URL(chip.href); history.replaceState(null, '', url.pathname + url.search + '#episodes');
       const p = document.getElementById(chip.dataset.target);
-      if (scroll && p) p.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      if (scroll && p) p.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'nearest' });
     };
     grid.addEventListener('click', (e) => {
       const chip = e.target.closest('a.epc');
       if (!chip) return;
       e.preventDefault(); show(chip, true);
     });
-    $$('[data-jump]').forEach(b => b.addEventListener('click', () => {
-      const chip = $('a.epc[data-target="' + b.dataset.jump + '"]', grid); if (chip) show(chip, false);
+    $$('[data-jump]').forEach(b => b.addEventListener('click', (e) => {
+      const chip = $('a.epc[data-target="' + b.dataset.jump + '"]', grid);
+      if (chip) { e.preventDefault(); show(chip, true); }
     }));
   }
 
@@ -142,7 +208,7 @@
     track.innerHTML = items.map(it => {
       const ep = it.ep != null ? 'Continue EP ' + it.ep : 'Continue';
       const img = it.poster
-        ? '<img src="' + esc(it.poster) + '" alt="' + esc(it.title) + ' poster" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">'
+        ? '<img src="' + esc(it.poster) + '" alt="' + esc(it.title) + ' poster" loading="lazy" decoding="async" referrerpolicy="no-referrer" onload="this.classList.add(\'is-on\')" onerror="this.remove()">'
         : '';
       const letter = esc(it.i || (it.title || '?')[0] || '?');
       return '<article class="card cw-card">' +
@@ -199,6 +265,23 @@
         e.preventDefault();
         cwWrite([]);
         cwRender();
+      }
+    });
+  }
+
+  // card / row fade-in on scroll
+  if (!reduceMotion() && 'IntersectionObserver' in window) {
+    const io = new IntersectionObserver((ents) => {
+      ents.forEach(en => {
+        if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); }
+      });
+    }, { rootMargin: '0px 0px -32px 0px', threshold: 0.06 });
+    $$('.card, .rail, .cta-band, .browse, .search-band').forEach(el => {
+      if (el.getBoundingClientRect().top < window.innerHeight - 24) {
+        el.classList.add('reveal', 'in');
+      } else {
+        el.classList.add('reveal');
+        io.observe(el);
       }
     });
   }

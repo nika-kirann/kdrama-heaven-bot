@@ -339,10 +339,13 @@ def test_web_poster_url_rendered_directly_everywhere(web, tg_files):
     P.invalidate()
     esc = "https://img.example/p.jpg?a=1&amp;b=2"
     home = raw(web, "/")[2]
-    # card + hero tile + hero backdrop: direct <img>, lazy, no referrer, removes itself on error (tile fallback)
+    # card + hero tile + hero backdrop: direct <img>, no referrer, removes itself on error (tile fallback).
+    # The first hero tile/backdrop may load eagerly; everything else stays lazy.
     imgs = re.findall(r'<img[^>]*src="%s"[^>]*>' % re.escape(esc), home)
     assert len(imgs) >= 3
-    assert all('loading="lazy"' in i and 'referrerpolicy="no-referrer"' in i and "onerror=" in i for i in imgs)
+    assert all(('loading="lazy"' in i or 'loading="eager"' in i) and 'referrerpolicy="no-referrer"' in i and "onerror=" in i for i in imgs)
+    assert any('loading="eager"' in i and 'fetchpriority="high"' in i for i in imgs)
+    assert any('loading="lazy"' in i for i in imgs)
     assert 'class="hero-bg ph has-img"' in home and 'class="bgimg"' in home
     page = raw(web, f"/drama/{d.id}")[2]
     assert re.search(r'class="dbg ph has-img"[^>]*><span>W</span><img class="bgimg" src="%s"' % re.escape(esc), page)
@@ -684,3 +687,70 @@ def test_season_2_only_has_no_empty_season_1(web):
     assert f"/drama/{d.id}" in sm
     hits = raw(web, "/api/search?q=Late")[2]
     assert "Late Season" in hits
+
+
+def test_ui_refresh_hero_cards_theme_and_drama_header(web):
+    a, b = seed(web.db)
+    home = raw(web, "/")[2]
+    assert 'id="hero"' in home and 'class="slide on"' in home
+    assert ">Watch<" in home or "Watch</a>" in home
+    assert 'id="theme-toggle"' in home and "kdh-theme" in home
+    assert 'id="theme-color"' in home
+    assert f"/static/public.css?v={P.ASSET_V}" in home
+    assert 'class="ep-badge"' in home
+    assert "Ongoing" in home and "Completed" in home
+    assert 'class="spill live"' in home and 'class="spill done"' in home
+    # two dramas → dots, auto-advance is client-side
+    assert 'class="dot on"' in home
+    js = raw(web, f"/static/public.js?v={P.ASSET_V}")[2]
+    assert "prefers-reduced-motion" in js and "kdh-theme" in js
+    assert "IntersectionObserver" in js and "touchstart" in js
+    css = raw(web, f"/static/public.css?v={P.ASSET_V}")[2]
+    assert "data-theme" in css and "skel-card" in css and "ep-badge" in css
+    # drama header: blurred backdrop, watch-latest, no NAME (YEAR)
+    body = raw(web, f"/drama/{b.id}")[2]
+    assert 'class="dhero"' in body and 'class="dbg' in body
+    assert "Watch latest episode" in body
+    assert "<h1>Squid Game</h1>" in body and "Squid Game (2021)" not in body
+    assert f"?s=1&amp;ep=1#episodes" in body
+    # single-season title still has no season switcher
+    assert 'class="seasons"' not in raw(web, f"/drama/{a.id}")[2]
+
+
+def test_watch_latest_and_season_tabs_live_in_header(web):
+    d = web.db.add_drama(title="Storage Show", status="Ongoing",
+                         episodes={1: [("720p", "https://x/s1e1", "part")],
+                                   2: [("720p", "https://x/s1e2", "part")]})
+    web.db.add_season(d.id, 4)
+    web.db.add_episodes(d.id, {1: [("1080p", "https://x/s2e1", "part")]}, season=2)
+    P.invalidate()
+    body = raw(web, f"/drama/{d.id}")[2]
+    header = body.split('class="dhero"')[1].split('class="dbody"')[0]
+    assert 'class="seasons"' in header and "Season 2" in header and "Season 1" in header
+    assert "Watch latest episode" in header
+    # latest episode is Season 2 EP 1
+    assert f'/drama/{d.id}-storage-show?s=2&amp;ep=1#episodes' in header
+    # episodes section no longer repeats the season tabs
+    eps = body.split('id="episodes"')[1]
+    assert 'class="seasons"' not in eps
+
+
+def test_resolve_status_and_featured_dramas():
+    assert P.resolve_status("Ongoing", None, 3, 16) == "Ongoing"
+    assert P.resolve_status("Completed", None, 16, 16) == "Completed"
+    assert P.resolve_status("", {"ep": 4}, 3, 16) == "Ongoing"
+    assert P.resolve_status(None, None, 16, 16) == "Completed"
+    assert P.resolve_status("  ", None, 0, 0) == "Ongoing"
+    from datetime import datetime
+    items = [
+        {"id": 1, "title": "A", "latest_at": datetime(2026, 1, 1)},
+        {"id": 2, "title": "B", "latest_at": datetime(2026, 2, 1)},
+        {"id": 3, "title": "C", "latest_at": datetime(2026, 3, 1)},
+        {"id": 4, "title": "D", "latest_at": datetime(2026, 4, 1)},
+        {"id": 5, "title": "E", "latest_at": None},
+        {"id": 6, "title": "F", "latest_at": datetime(2026, 5, 1)},
+    ]
+    cat = {"items": items, "trending": [items[0], items[5]]}
+    feat = P.featured_dramas(cat, 5)
+    assert [d["id"] for d in feat] == [1, 6, 4, 3, 2]
+    assert len(P.featured_dramas({"items": items[:2], "trending": []}, 5)) == 2

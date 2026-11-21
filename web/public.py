@@ -20,7 +20,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from . import html as H
 
 log = logging.getLogger(__name__)
-ASSET_V = "10"
+ASSET_V = "11"
 CACHE_TTL = 60.0
 SITEMAP_TTL = 3600.0
 CATALOG_MAX = 3000       # dramas kept in the single cached snapshot (bounded memory)
@@ -183,7 +183,8 @@ def _build(ctx) -> dict:
         elif ref:
             poster = f"/poster/{d['id']}.jpg?v={abs(hash(ref)) % 10**8}"
         items.append({
-            "id": d["id"], "title": d["title"], "year": d["year"], "status": d["status"],
+            "id": d["id"], "title": d["title"], "year": d["year"],
+            "status": resolve_status(d["status"], nxt, have, tot),
             "genres": [g.strip() for g in d["genres"].split(",") if g.strip()],
             "synopsis": d["synopsis"][:SYNOPSIS_MAX], "imdb": d["imdb"],
             "audio": d["audio"] or getattr(cfg, "default_audio", ""),
@@ -287,6 +288,34 @@ def tme(bot: str, payload: str = "") -> str:
 e = H.e
 
 
+def resolve_status(status: str | None, nxt, have, total) -> str:
+    """Use the stored status; if it's missing, infer Ongoing vs Completed."""
+    st = (status or "").strip()
+    if st in ("Ongoing", "Completed"):
+        return st
+    if nxt:
+        return "Ongoing"
+    if total and have and have >= total:
+        return "Completed"
+    return st or "Ongoing"
+
+
+def featured_dramas(cat: dict, n: int = 5) -> list:
+    """3–5 hero slides: trending this week first, then newest updates."""
+    seen, out = set(), []
+    newest = sorted(
+        [d for d in cat.get("items") or [] if d.get("latest_at")],
+        key=lambda d: d["latest_at"], reverse=True)
+    for d in list(cat.get("trending") or []) + newest + list(cat.get("items") or []):
+        if d["id"] in seen:
+            continue
+        seen.add(d["id"])
+        out.append(d)
+        if len(out) >= n:
+            break
+    return out
+
+
 def progress(d) -> str:
     if d["total"]:
         return f"{d['have']}/{d['total']} EP"
@@ -314,18 +343,22 @@ def poster_img(d, cls: str = "", eager: bool = False) -> str:
     letter = e(initial(d))
     img = ""
     if d["poster"]:
-        img = (f'<img src="{e(d["poster"])}" alt="{e(d["title"])} poster" loading="lazy" decoding="async" '
-               f'referrerpolicy="no-referrer" onerror="this.remove()">')
+        load = "eager" if eager else "lazy"
+        prio = ' fetchpriority="high"' if eager else ""
+        img = (f'<img src="{e(d["poster"])}" alt="{e(d["title"])} poster" loading="{load}" decoding="async"{prio} '
+               f'referrerpolicy="no-referrer" onload="this.classList.add(\'is-on\')" onerror="this.remove()">')
     tile = (f'<span class="pst-ph" aria-hidden="true">{letter}</span>'
             f'<span class="pst-t">{e(d["title"])}</span>')
     return f'<div class="pst {cls}" style="--h:{hue(d)}">{tile}{img}</div>'
 
 
-def backdrop(d, cls: str) -> str:
+def backdrop(d, cls: str, eager: bool = False) -> str:
     """Gradient backdrop; with a poster, a blurred <img> on top that removes itself if it fails to load."""
     img = ""
     if d["poster"]:
-        img = (f'<img class="bgimg" src="{e(d["poster"])}" alt="" loading="lazy" decoding="async" '
+        load = "eager" if eager else "lazy"
+        prio = ' fetchpriority="high"' if eager else ""
+        img = (f'<img class="bgimg" src="{e(d["poster"])}" alt="" loading="{load}" decoding="async"{prio} '
                f'referrerpolicy="no-referrer" onerror="this.parentNode.classList.remove(\'has-img\');this.remove()">')
     return (f'<div class="{cls} ph{" has-img" if img else ""}" style="--h:{hue(d)}">'
             f'<span>{e(initial(d))}</span>{img}</div>')
@@ -336,10 +369,12 @@ def drama_url(d) -> str:
 
 
 def card(d, extra: str = "") -> str:
-    meta = " · ".join(x for x in [str(d["year"]) if d["year"] else "", progress(d)] if x)
+    year = str(d["year"]) if d["year"] else ""
     return (f'<a class="card" href="{drama_url(d)}">{poster_img(d)}'
             f'<div class="card-badges">{status_pill(d["status"])}{extra}</div>'
-            f'<div class="card-body"><h3>{e(d["title"])}</h3><p>{e(meta)}</p></div></a>')
+            f'<span class="ep-badge">{e(progress(d))}</span>'
+            f'<div class="card-body"><h3>{e(d["title"])}</h3>'
+            f'{"<p>" + e(year) + "</p>" if year else ""}</div></a>')
 
 
 ICONS = {
@@ -356,11 +391,13 @@ ICONS = {
     "dl": '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
     "mirror": '<path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
     "sparkle": '<path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4Z"/>',
+    "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+    "moon": '<path d="M21 14.5A8.5 8.5 0 1 1 9.5 3 7 7 0 0 0 21 14.5z"/>',
 }
 
 
 def ic(name: str, cls: str = "") -> str:
-    fill = name in {"play", "star"}
+    fill = name in {"play", "star", "moon"}
     return (f'<svg class="i {cls}" viewBox="0 0 24 24" fill="{"currentColor" if fill else "none"}" stroke="currentColor" '
             f'stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{ICONS[name]}</svg>')
 
@@ -562,7 +599,8 @@ def page(ctx, *, title: str, body: str, desc: str = "", image: str | None = None
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>{e(full_title)}</title>
 <meta name="description" content="{e(desc[:300])}">{robots_tag}{verify_tag}
-<meta name="theme-color" content="#0b0918">
+<meta name="theme-color" content="#0b0918" id="theme-color">
+<script>(function(){{try{{var t=localStorage.getItem('kdh-theme');if(t==='light'){{document.documentElement.setAttribute('data-theme','light');var m=document.getElementById('theme-color');if(m)m.setAttribute('content','#f3f0fa');}}}}catch(e){{}}}})();</script>
 <link rel="canonical" href="{e(canon + path)}">
 <meta property="og:type" content="website"><meta property="og:site_name" content="{SITE_NAME}">
 <meta property="og:title" content="{e(full_title)}"><meta property="og:description" content="{e(desc[:300])}">
@@ -580,6 +618,7 @@ def page(ctx, *, title: str, body: str, desc: str = "", image: str | None = None
     <a class="logo" href="/" aria-label="Kdrama Heaven home"><picture><source type="image/webp" srcset="/static/logo.webp?v={ASSET_V}"><img class="logo-img" src="/static/logo.png?v={ASSET_V}" alt="Kdrama Heaven" width="349" height="140" decoding="async"></picture></a>
     <nav class="hnav">{navl("home", "/", "Home")}{navl("Ongoing", "/?status=ongoing#browse", "Ongoing")}{navl("Completed", "/?status=completed#browse", "Completed")}</nav>
     <div class="hdr-r">
+      <button type="button" class="icon-b" id="theme-toggle" aria-label="Switch to light theme" aria-pressed="false">{ic("sun", "sun")}{ic("moon", "moon")}</button>
       <button type="button" class="icon-b" id="search-open" aria-label="Search">{ic("search")}</button>
       <a class="tg-b" href="https://t.me/{e(chan)}" target="_blank" rel="noopener">{ic("tg")}<span>@{e(chan)}</span></a>
     </div>
@@ -601,6 +640,7 @@ def page(ctx, *, title: str, body: str, desc: str = "", image: str | None = None
   </div>
   <p class="ftr-note">kdrama_heaven lists links shared on our Telegram channel. © {datetime.now().year} kdrama_heaven</p>
 </footer>
+<script>(function(){{try{{var v=JSON.parse(localStorage.getItem('kdh-continue')||'[]');if(!Array.isArray(v)||!v.length)return;var s=document.getElementById('continue'),t=document.getElementById('continue-track');if(!s||!t)return;s.hidden=false;var n=Math.min(v.length,6),h='';while(n--)h+='<article class="card skel-card" aria-hidden="true"><div class="pst"></div><div class="card-body"><i></i><i></i></div></article>';t.innerHTML=h;}}catch(e){{}}}})();</script>
 <script src="/static/public.js?v={ASSET_V}" defer></script>
 </body></html>"""
 
@@ -627,8 +667,7 @@ def home(ctx, status: str = "", host: str = "") -> str:
     ongoing = [d for d in items if d["status"] != "Completed"]
     completed = [d for d in items if d["status"] == "Completed"]
     latest = sorted([d for d in items if d["latest_at"]], key=lambda d: d["latest_at"], reverse=True)
-    featured = (sorted(ongoing, key=lambda d: d["latest_at"] or datetime.min, reverse=True)[:5]
-                or latest[:5] or items[:5])
+    featured = featured_dramas(cat, 5)
     slides, dots = [], []
     for i, d in enumerate(featured):
         nxt = (f'<span class="hmeta-i">{ic("cal")}Next: EP {d["next"]["ep"]} · {e(d["next"]["date"])}</span>'
@@ -636,7 +675,7 @@ def home(ctx, status: str = "", host: str = "") -> str:
         meta = "".join(f'<span class="hmeta-i">{x}</span>' for x in [
             e(str(d["year"])) if d["year"] else "", f'{ic("star")}{e(d["imdb"])}' if d["imdb"] else "",
             e(progress(d))] if x) + nxt
-        bg = backdrop(d, "hero-bg")
+        bg = backdrop(d, "hero-bg", eager=(i == 0))
         slides.append(f"""
         <article class="slide{' on' if i == 0 else ''}" data-slide="{i}">
           {bg}<div class="hero-shade"></div>
@@ -646,7 +685,7 @@ def home(ctx, status: str = "", host: str = "") -> str:
               <p class="hero-title">{e(d['title'])}</p>
               <div class="hmeta">{meta}</div>
               <p class="hero-syn">{e(d['synopsis'][:240] + ('…' if len(d['synopsis']) > 240 else ''))}</p>
-              <div class="hero-cta"><a class="btn pri" href="{drama_url(d)}#episodes">{ic('play')}Watch now</a>
+              <div class="hero-cta"><a class="btn pri" href="{drama_url(d)}#episodes">{ic('play')}Watch</a>
                 <a class="btn ghost" href="{drama_url(d)}">Details</a></div>
             </div>
             {poster_img(d, 'hero-pst', eager=(i == 0))}
@@ -803,6 +842,14 @@ def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None,
             f'<a class="tab{" on" if s["n"] == sea["n"] else ""}" href="{drama_url(d)}?s={s["n"]}#episodes">'
             f'Season {s["n"]}<span>{len(s["eps"])}{"/" + str(s["total"]) if s["total"] else ""}</span></a>'
             for s in seas) + "</div>"
+    latest_sea = max((s for s in seas if s.get("eps")), key=lambda s: (s["n"], s["eps"][-1]["n"]), default=None)
+    latest_ep = latest_sea["eps"][-1] if latest_sea else None
+    if latest_ep:
+        watch_href = f'{drama_url(d)}?s={latest_sea["n"]}&amp;ep={latest_ep["n"]}#episodes'
+        jump = f' data-jump="ep-{latest_sea["n"]}-{latest_ep["n"]}"' if latest_sea["n"] == sea["n"] else ""
+        watch_btn = f'<a class="btn pri xl"{jump} href="{watch_href}">{ic("play")}Watch latest episode</a>'
+    else:
+        watch_btn = f'<a class="btn pri xl" href="#episodes">{ic("play")}Episodes</a>'
     chips = "".join(
         f'<a class="epc{" on" if sel and x["n"] == sel["n"] else ""}" href="{drama_url(d)}?s={sea["n"]}&amp;ep={x["n"]}#episodes" '
         f'data-ep="{x["n"]}" data-target="ep-{sea["n"]}-{x["n"]}">{x["n"]}</a>' for x in eps)
@@ -835,7 +882,6 @@ def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None,
         nxt = (f'<div class="next">{ic("cal")}<div><span>Next episode · EP {d["next"]["ep"]}</span>'
                f'<b>{e(d["next"]["date"])}</b>{"<small>" + e(d["next"]["time"]) + "</small>" if d["next"]["time"] else ""}</div></div>')
     bg = backdrop(d, "dbg")
-    first = eps[0] if eps else None
     body = f"""
     <section class="dhero">{bg}<div class="dshade"></div>
       <div class="wrap dhero-in">
@@ -844,10 +890,11 @@ def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None,
           <nav aria-label="Breadcrumb"><a class="crumb" href="/">Home</a></nav>
           <h1>{e(d['title'])}</h1>
           <div class="gchips">{genres}</div>
+          {switch}
           <p class="syn">{e(d['synopsis'])}</p>
           {nxt}
           <div class="dcta">
-            {f'<a class="btn pri" href="#episodes" data-jump="ep-{sea["n"]}-{first["n"]}">{ic("play")}Start EP 1</a>' if first and first["n"] == 1 else f'<a class="btn pri" href="#episodes">{ic("play")}Episodes</a>'}
+            {watch_btn}
             <a class="btn ghost" href="{tme(bot, 'drama_' + str(d['id']))}" target="_blank" rel="noopener">{ic("tg")}Open in Telegram</a>
             <a class="btn ghost" href="{tme(bot, 'follow_' + str(d['id']))}" target="_blank" rel="noopener">{ic("bell")}Notify me</a>
           </div>
@@ -857,7 +904,6 @@ def drama_page(ctx, did: int, season: int | None = None, epn: int | None = None,
     <div class="wrap dbody">
       <section class="eps" id="episodes">
         <div class="sec-h"><div><h2>Episodes</h2><p>Pick an episode, then choose 480p, 720p or 1080p.</p></div></div>
-        {switch}
         {eps_html}
       </section>
       <aside class="side">
